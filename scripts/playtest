@@ -1,0 +1,81 @@
+#!/bin/sh
+set -eu
+
+gallery=${1:?usage: scripts/playtest GALLERY OUTPUT_DIR}
+out=${2:?usage: scripts/playtest GALLERY OUTPUT_DIR}
+case "$gallery" in
+    slider_gallery) ;;
+    date_spool_gallery) ;;
+    *) printf 'unknown gallery: %s\n' "$gallery" >&2; exit 2 ;;
+esac
+
+mkdir -p "$out"
+target=$(cargo metadata --format-version 1 --no-deps | jq -r .target_directory)
+app="$target/debug/examples/$gallery"
+cargo build --example "$gallery"
+
+setsid "$app" >"$out/app.log" 2>&1 &
+leader=$!
+cleanup() {
+    kill -- "-$leader" 2>/dev/null || true
+    reap=0
+    while kill -0 "$leader" 2>/dev/null && [ "$reap" -lt 20 ]; do
+        reap=$((reap + 1))
+        sleep 0.05
+    done
+    kill -KILL -- "-$leader" 2>/dev/null || true
+    wait "$leader" 2>/dev/null || true
+}
+trap cleanup EXIT HUP INT TERM
+
+window=$(timeout 60 xdotool search --sync --onlyvisible --pid "$leader")
+xdotool windowmap --sync "$window"
+xdotool windowfocus --sync "$window"
+xwininfo -id "$window" >"$out/window.txt"
+ready=0
+attempt=0
+while [ "$attempt" -lt 80 ]; do
+    import -window "$window" "$out/initial.png"
+    if [ "$(magick "$out/initial.png" -format '%[fx:mean>0.005?1:0]' info:)" = 1 ]; then
+        ready=1
+        break
+    fi
+    attempt=$((attempt + 1))
+    sleep 0.1
+done
+if [ "$ready" -ne 1 ]; then
+    printf 'gallery never produced a nonblack frame\n' >&2
+    exit 1
+fi
+
+case "$gallery" in
+    slider_gallery)
+        xdotool mousemove --window "$window" 296 143 mousedown 1
+        sleep 0.12
+        for x in 360 430 500 570; do
+            xdotool mousemove --window "$window" "$x" 143
+            sleep 0.12
+        done
+        import -window "$window" "$out/wake.png"
+        xdotool mousemove --window "$window" 610 143
+        sleep 0.06
+        xdotool mouseup 1
+        ;;
+    date_spool_gallery)
+        xdotool mousemove --window "$window" 185 190 click 4 click 4
+        ;;
+esac
+sleep 0.5
+import -window "$window" "$out/actuated.png"
+
+if [ "$gallery" = slider_gallery ]; then
+    # Drive the external ceiling through the carriage. This exercises both a
+    # moving blocker and the blocker's compulsory displacement of the handle.
+    xdotool mousemove --window "$window" 128 290 click 1 click 1 click 1
+    sleep 0.25
+    import -window "$window" "$out/blocker.png"
+fi
+
+if rg -i 'panic|validation (error|failure)|device lost' "$out/app.log"; then
+    exit 1
+fi

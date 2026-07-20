@@ -142,9 +142,9 @@ pub(super) struct Splash {
     pub(super) age: f32,
     pub(super) amp: f32,
     pub(super) shape: SplashShape,
-    /// Signed screen-y a dragged surface (a spun tape) travels, 0 for a plain
-    /// splash. Non-zero turns the source into a directional velocity dipole.
-    pub(super) drag: f32,
+    /// Signed travel along the source shape's axis, 0 for a plain splash.
+    /// Non-zero turns the source into a directional velocity dipole.
+    pub(super) travel: f32,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -156,6 +156,8 @@ pub(super) enum SplashShape {
     /// "thwacked" from beneath. The solver's KO term shreds the high-k content
     /// into a quick shimmer; the sparse low-k residue rides out.
     Jitter,
+    /// A horizontal solid sweep: carriage or stop plate moving through water.
+    Slide,
 }
 
 impl SplashShape {
@@ -923,7 +925,7 @@ fn uniforms(frame: &super::Frame) -> Uniforms {
             splash.age,
             splash.amp,
             splash.shape.code(),
-            splash.drag,
+            splash.travel,
         ];
     }
     packed.pond = [

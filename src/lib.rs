@@ -1,4 +1,11 @@
-//! The Dwemer Poolrooms design system: exact egui chrome over living water surfaces.
+#![cfg_attr(
+    test,
+    expect(
+        unused_crate_dependencies,
+        reason = "egui-winit belongs to the dev-only live gallery host"
+    )
+)]
+#![doc = include_str!("../README.md")]
 
 pub mod chrome;
 mod tide;

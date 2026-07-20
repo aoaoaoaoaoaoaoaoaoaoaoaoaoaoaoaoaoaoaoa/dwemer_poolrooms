@@ -12,8 +12,19 @@ keywords = ["egui", "wgpu", "gui", "shader"]
 categories = ["gui", "graphics", "rendering"]
 include = ["src/**", "examples/**", "assets/**", "LICENSE*", "README.md"]
 
+[package.metadata.docs.rs]
+all-features = true
+
 [[example]]
 name = "login_surface"
+required-features = ["water"]
+
+[[example]]
+name = "slider_gallery"
+required-features = ["water"]
+
+[[example]]
+name = "date_spool_gallery"
 required-features = ["water"]
 
 [workspace]
@@ -37,6 +48,7 @@ egui = "=0.34.3"
 egui-wgpu = { version = "=0.34.3", optional = true }
 
 [dev-dependencies]
+egui-winit = "=0.34.3"
 pollster = "0.4"
 
 [lints]

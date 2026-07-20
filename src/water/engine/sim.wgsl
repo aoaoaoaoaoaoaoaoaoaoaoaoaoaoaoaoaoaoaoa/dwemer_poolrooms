@@ -106,26 +106,43 @@ fn source_basin(px: vec2f, rect: vec4f, age: f32, amp: f32) -> f32 {
     return amp * prism * birth * BASIN_GAIN;
 }
 
-// A spun tape strip dragging the water in contact with it (`drag` is the signed
-// screen-y the tape head travels). Friction piles the bulk off the leading edge
-// — a bulge shoved outward there — with a weaker suction trailing behind, the
-// bow-wave/wake of a moving surface. Skewed positive, so it reads as a push.
-fn source_drag(px: vec2f, rect: vec4f, age: f32, amp: f32, drag: f32) -> f32 {
+// A solid sweeping water along one screen axis. Friction piles the bulk off the
+// leading edge with weaker trailing suction: the bow-wave/wake dipole of its
+// displaced volume. `along` is the driven coordinate and `across` its span.
+fn source_sweep(
+    along: f32,
+    across: f32,
+    lo: f32,
+    hi: f32,
+    cross_center: f32,
+    cross_half: f32,
+    age: f32,
+    amp: f32,
+    travel: f32,
+) -> f32 {
     if (amp == 0.0 || age > SOURCE_LIFE) {
         return 0.0;
     }
+    let reach = max(forcing.chemistry.wave_sigma * 1.2, 8.0);
+    let breadth = exp(-0.5 * (across - cross_center) * (across - cross_center) / (cross_half * cross_half));
+    let lead = select(lo, hi, travel > 0.0) + travel * reach;
+    let bulge = exp(-0.5 * (along - lead) * (along - lead) / (reach * reach));
+    let trail = select(hi, lo, travel > 0.0) - travel * reach * 0.5;
+    let suck = exp(-0.5 * (along - trail) * (along - trail) / (reach * reach * 1.6));
+    let birth = 1.0 - smoothstep(0.0, SOURCE_LIFE, age);
+    return amp * birth * breadth * (bulge - 0.5 * suck);
+}
+
+fn source_drag(px: vec2f, rect: vec4f, age: f32, amp: f32, travel: f32) -> f32 {
     let cx = (rect.x + rect.z) * 0.5;
     let half_w = max((rect.z - rect.x) * 0.5, 4.0);
-    let reach = max(forcing.chemistry.wave_sigma * 1.2, 8.0);
-    let across = exp(-0.5 * (px.x - cx) * (px.x - cx) / (half_w * half_w));
-    // Leading bulge: a crest centred just past the edge the tape drives toward.
-    let lead_y = select(rect.y, rect.w, drag > 0.0) + drag * reach;
-    let bulge = exp(-0.5 * (px.y - lead_y) * (px.y - lead_y) / (reach * reach));
-    // Trailing suction off the opposite edge, shallower.
-    let trail_y = select(rect.w, rect.y, drag > 0.0) - drag * reach * 0.5;
-    let suck = exp(-0.5 * (px.y - trail_y) * (px.y - trail_y) / (reach * reach * 1.6));
-    let birth = 1.0 - smoothstep(0.0, SOURCE_LIFE, age);
-    return amp * birth * across * (bulge - 0.5 * suck);
+    return source_sweep(px.y, px.x, rect.y, rect.w, cx, half_w, age, amp, travel);
+}
+
+fn source_slide(px: vec2f, rect: vec4f, age: f32, amp: f32, travel: f32) -> f32 {
+    let cy = (rect.y + rect.w) * 0.5;
+    let half_h = max((rect.w - rect.y) * 0.5, 4.0);
+    return source_sweep(px.x, px.y, rect.x, rect.z, cy, half_h, age, amp, travel);
 }
 
 fn hash12(p: vec2f) -> f32 {
@@ -153,7 +170,8 @@ fn source(px: vec2f) -> f32 {
     var drive = 0.0;
     for (var i = 0u; i < 32u; i = i + 1u) {
         let splash = forcing.splashes[i];
-        if (abs(splash.vitals.w) > 0.5) { drive = drive + source_drag(px, splash.rect, splash.vitals.x, splash.vitals.y, splash.vitals.w); }
+        if (splash.vitals.z > 2.5) { drive = drive + source_slide(px, splash.rect, splash.vitals.x, splash.vitals.y, splash.vitals.w); }
+        else if (abs(splash.vitals.w) > 0.5) { drive = drive + source_drag(px, splash.rect, splash.vitals.x, splash.vitals.y, splash.vitals.w); }
         else if (splash.vitals.z > 1.5) { drive = drive + source_jitter(px, splash.rect, splash.vitals.x, splash.vitals.y); }
         else if (splash.vitals.z > 0.5) { drive = drive + source_basin(px, splash.rect, splash.vitals.x, splash.vitals.y); }
         else { drive = drive + source_shell(px, splash.rect, splash.vitals.x, splash.vitals.y); }

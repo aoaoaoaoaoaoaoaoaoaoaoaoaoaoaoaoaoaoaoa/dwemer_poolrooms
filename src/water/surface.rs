@@ -21,6 +21,9 @@ const TILT_TELEPORT: f32 = 2500.0;
 const TILT_SPEED_CEIL: f32 = 14_000.0;
 const FORCE_CEIL: f32 = 48.0;
 const FORCE_EPSILON: f32 = 0.015;
+/// Logical-point² of unit-depth swept volume that produces one canonical impulse.
+const RAIL_AREA_PER_IMPULSE: f32 = 2_000.0;
+const RAIL_IMPULSE_CEIL: f32 = 1.60;
 static NEXT_SURFACE_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -115,10 +118,24 @@ impl Default for Agitation {
 /// surface's current wetness; ages, capacity, and GPU representation stay private.
 #[derive(Clone, Copy, Debug)]
 pub enum Poke {
-    Ring { impulse: f32 },
-    Basin { impulse: f32 },
-    Drag { impulse: f32, travel: f32 },
-    Jitter { impulse: f32 },
+    Ring {
+        impulse: f32,
+    },
+    Basin {
+        impulse: f32,
+    },
+    Drag {
+        impulse: f32,
+        travel: f32,
+    },
+    /// A horizontal swept-solid dipole: leading bulge and trailing suction.
+    Slide {
+        impulse: f32,
+        travel: f32,
+    },
+    Jitter {
+        impulse: f32,
+    },
 }
 
 impl Poke {
@@ -131,6 +148,10 @@ impl Poke {
     pub const fn drag(impulse: f32, travel: f32) -> Self {
         Self::Drag { impulse, travel }
     }
+    /// Construct a horizontal sweep. The sign of `travel` chooses its direction.
+    pub const fn slide(impulse: f32, travel: f32) -> Self {
+        Self::Slide { impulse, travel }
+    }
     pub const fn jitter(impulse: f32) -> Self {
         Self::Jitter { impulse }
     }
@@ -140,6 +161,7 @@ impl Poke {
             Self::Ring { impulse } => (impulse, engine::SplashShape::Ring, 0.0),
             Self::Basin { impulse } => (impulse, engine::SplashShape::Basin, 0.0),
             Self::Drag { impulse, travel } => (impulse, engine::SplashShape::Ring, travel),
+            Self::Slide { impulse, travel } => (impulse, engine::SplashShape::Slide, travel),
             Self::Jitter { impulse } => (impulse, engine::SplashShape::Jitter, 0.0),
         }
     }
@@ -289,7 +311,7 @@ struct Plunge {
     born: Instant,
     amp: f32,
     shape: engine::SplashShape,
-    drag: f32,
+    travel: f32,
 }
 
 struct TouchPlunge {
@@ -531,8 +553,8 @@ impl Surface {
 
     /// Place an excitation anywhere on the surface in logical egui coordinates.
     pub fn poke(&mut self, rect: egui::Rect, poke: Poke) {
-        let (amp, shape, drag) = poke.vitals();
-        self.poke_scaled(rect, amp * self.wetness.drench().wave, shape, drag);
+        let (amp, shape, travel) = poke.vitals();
+        self.poke_scaled(rect, amp * self.wetness.drench().wave, shape, travel);
     }
 
     pub fn bump(&mut self, rect: egui::Rect) {
@@ -546,6 +568,24 @@ impl Surface {
     }
     pub fn drag(&mut self, rect: egui::Rect, travel: f32) {
         self.poke(rect, Poke::drag(0.16, travel));
+    }
+    /// Couple every solid swept by a Poolrooms rail into the horizontal water
+    /// velocity field. Impulse is proportional to projected displaced volume;
+    /// only the solver-protection ceiling is artistic compression.
+    pub fn rail(&mut self, rail: &crate::chrome::RailResponse) {
+        for wake in rail.wakes() {
+            let impulse = (wake.area / RAIL_AREA_PER_IMPULSE).min(RAIL_IMPULSE_CEIL);
+            self.poke(wake.rect, Poke::slide(impulse, wake.travel.signum()));
+        }
+    }
+    /// Couple a date transport's tape and lever displacement into this water world.
+    pub fn date_spool(&mut self, spool: &crate::chrome::DateSpoolResponse) {
+        for wake in spool.wakes() {
+            match wake {
+                crate::chrome::DateWake::Tape(rect, travel) => self.drag(rect, travel),
+                crate::chrome::DateWake::Lever(rect, sign) => self.lever(rect, sign),
+            }
+        }
     }
     pub fn select(&mut self, rect: egui::Rect) {
         self.poke(rect, Poke::ring(0.45));
@@ -638,7 +678,7 @@ impl Surface {
                 age: p.born.elapsed().as_secs_f32(),
                 amp: p.amp,
                 shape: p.shape,
-                drag: p.drag,
+                travel: p.travel,
             })
             .collect();
         let raft = self
@@ -714,7 +754,7 @@ impl Surface {
         }
     }
 
-    fn poke_scaled(&mut self, rect: egui::Rect, amp: f32, shape: engine::SplashShape, drag: f32) {
+    fn poke_scaled(&mut self, rect: egui::Rect, amp: f32, shape: engine::SplashShape, travel: f32) {
         if amp.abs() <= f32::EPSILON {
             return;
         }
@@ -732,7 +772,7 @@ impl Surface {
             born: Instant::now(),
             amp,
             shape,
-            drag,
+            travel,
         });
         self.arm();
     }
@@ -940,6 +980,17 @@ mod tests {
                 .iter()
                 .all(|p| p.amp >= (engine::SPLASH_SLOTS * 2) as f32)
         );
+    }
+
+    #[test]
+    fn horizontal_sweeps_retain_axis_and_wetness_impulse() {
+        let mut surface = Surface::new(Wetness::Wet);
+        let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(80.0, 14.0));
+        surface.poke(rect, Poke::slide(0.4, -1.0));
+        let sweep = &surface.plunges[0];
+        assert_eq!(sweep.shape, engine::SplashShape::Slide);
+        assert_eq!(sweep.travel, -1.0);
+        assert!((sweep.amp - 0.5).abs() < f32::EPSILON);
     }
 
     #[test]

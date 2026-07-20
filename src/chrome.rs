@@ -1,7 +1,25 @@
+//! Machined, renderer-agnostic controls and the common Poolrooms visual language.
+//!
+//! Call [`install`] once for each `egui::Context` before constructing the UI.
+//! It installs the embedded typefaces, palette, spacing, and widget visuals.
+//!
+//! [`Rail`] and [`DateSpool`] are the crafted mechanisms. They return richer
+//! response types that expose ordinary interaction state and the volume their
+//! moving solids displaced. Applications using the optional `water` feature
+//! pass those responses to `water::Surface::rail` or
+//! `water::Surface::date_spool` during the same UI pass.
+
 use std::f32::consts::TAU;
 use std::sync::Arc;
 
 use egui::{Color32, FontData, FontDefinitions, FontFamily, RichText, Sense, Stroke, Vec2};
+
+mod date_spool;
+mod foundry;
+mod rail;
+
+pub use date_spool::{DateSpool, DateSpoolResponse, DateWake, GregorianDay, take_date_spool_wheel};
+pub use rail::{Rail, RailResponse, RailWake, rail_u16, rail_u16_sized};
 
 const CMU_TYPEWRITER: &[u8] = include_bytes!("../assets/fonts/cmu-typewriter/cmuntt.ttf");
 const NOTO_MATH: &[u8] = include_bytes!("../assets/fonts/noto/NotoSansMath-Regular.ttf");
@@ -25,6 +43,11 @@ pub const TEXT: Color32 = Color32::from_rgb(226, 217, 198);
 pub const MUTED: Color32 = Color32::from_rgb(158, 147, 128);
 pub const HOT: Color32 = Color32::from_rgb(235, 197, 151);
 
+/// Install the Poolrooms fonts, palette, spacing, and control visuals.
+///
+/// This replaces the context's global egui visuals and font definitions. Call
+/// it once after creating a context, and again only if another subsystem later
+/// replaces those definitions.
 pub fn install(ctx: &egui::Context) {
     install_fonts(ctx);
     let mut visuals = egui::Visuals::dark();
@@ -468,68 +491,6 @@ fn glyph_weight(ch: char) -> f32 {
 
 pub fn icon_button(text: impl Into<String>) -> egui::Button<'static> {
     egui::Button::new(RichText::new(text.into()).size(14.0).color(HOT)).min_size(Vec2::splat(22.0))
-}
-
-pub fn rail_u16(
-    ui: &mut egui::Ui,
-    value: &mut u16,
-    range: std::ops::RangeInclusive<u16>,
-) -> egui::Response {
-    rail_u16_sized(ui, value, range, ui.available_width())
-}
-
-pub fn rail_u16_sized(
-    ui: &mut egui::Ui,
-    value: &mut u16,
-    range: std::ops::RangeInclusive<u16>,
-    width: f32,
-) -> egui::Response {
-    let start = *range.start();
-    let end = *range.end();
-    let old = *value;
-    let (rect, mut response) = ui.allocate_exact_size(
-        egui::vec2(width.min(ui.available_width()), 22.0),
-        Sense::click_and_drag(),
-    );
-    if (response.clicked() || response.dragged())
-        && let Some(pos) = response.interact_pointer_pos()
-    {
-        let t = ((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
-        let span = f32::from(end.saturating_sub(start));
-        *value = (f32::from(start) + t * span).round() as u16;
-    }
-    *value = (*value).clamp(start, end);
-    if *value != old {
-        response.mark_changed();
-    }
-    let span = f32::from(end.saturating_sub(start)).max(1.0);
-    paint_rail(ui, rect, f32::from((*value).saturating_sub(start)) / span);
-    response
-}
-
-fn paint_rail(ui: &mut egui::Ui, rect: egui::Rect, t: f32) {
-    let track = egui::Rect::from_min_max(
-        egui::pos2(rect.left(), rect.center().y - 3.0),
-        egui::pos2(rect.right(), rect.center().y + 3.0),
-    );
-    let x = egui::lerp(track.left()..=track.right(), t);
-    let fill = egui::Rect::from_min_max(track.min, egui::pos2(x, track.max.y));
-    let thumb = egui::Rect::from_center_size(egui::pos2(x, track.center().y), Vec2::new(8.0, 18.0));
-    let _track = ui.painter().rect_filled(track, 0.0, CONTROL);
-    let _track_stroke = ui.painter().rect_stroke(
-        track,
-        0.0,
-        Stroke::new(1.0_f32, EDGE),
-        egui::StrokeKind::Inside,
-    );
-    let _fill = ui.painter().rect_filled(fill, 0.0, EDGE_STRONG);
-    let _thumb = ui.painter().rect_filled(thumb, 0.0, HOT);
-    let _thumb_stroke = ui.painter().rect_stroke(
-        thumb,
-        0.0,
-        Stroke::new(1.0_f32, Color32::from_rgb(2, 7, 10)),
-        egui::StrokeKind::Inside,
-    );
 }
 
 pub fn eyebrow(text: impl Into<String>) -> RichText {

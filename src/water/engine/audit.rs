@@ -732,8 +732,12 @@ impl Script {
                 rect,
                 age: (i as f32 % 11.0) * 0.023,
                 amp: 10.0 + i as f32 % 7.0,
-                shape: SplashShape::Ring,
-                drag: 0.0,
+                shape: if i % 4 == 0 {
+                    SplashShape::Slide
+                } else {
+                    SplashShape::Ring
+                },
+                travel: if i.is_multiple_of(2) { 1.0 } else { -1.0 },
             });
         }
         let raft = frame.is_multiple_of(3).then(|| {
@@ -768,9 +772,13 @@ impl Script {
                 rect: rect.translate(jitter),
                 age: ((i + frame) % 8) as f32 * 0.006,
                 amp: 1.8,
-                shape: SplashShape::Ring,
+                shape: if i % 4 == 0 {
+                    SplashShape::Slide
+                } else {
+                    SplashShape::Ring
+                },
                 // exercise the directional dipole path under load too
-                drag: [0.0, 1.0, -1.0][i % 3],
+                travel: [0.0, 1.0, -1.0][i % 3],
             });
         }
         Self {
