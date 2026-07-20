@@ -1,10 +1,10 @@
-//! Persistent GPU water and the forcing vocabulary that drives it.
+//! Persistent GPU water worlds and the forcing vocabulary that drives them.
 
-mod gpu;
+mod engine;
 mod machines;
-mod table;
+mod surface;
 
-pub use gpu::{Brine as Chemistry, Frost};
-pub use table::{Agitation, Cut, Frame, Poke, Veil, WaterTable, Wetness};
+pub use engine::{Chemistry, Engine};
+pub use surface::{Agitation, Cut, Domain, Floor, Frame, Poke, Surface, Veil, Wetness};
 
-pub const BULGE_CEIL: f32 = gpu::BULGE_CEIL;
+pub const BULGE_CEIL: f32 = engine::BULGE_CEIL;

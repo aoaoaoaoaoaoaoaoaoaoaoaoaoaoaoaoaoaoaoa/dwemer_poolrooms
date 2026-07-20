@@ -1,14 +1,27 @@
+use super::super::Frame;
 use super::*;
 use anyhow::{Context as _, Result, bail};
-use std::{fs, process, sync::mpsc, time::Duration};
+use std::{
+    fs,
+    future::Future,
+    process,
+    sync::{Arc, Mutex, MutexGuard, PoisonError, mpsc},
+    time::Duration,
+};
 
-const SURFACE: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+const TARGET_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 const W: u32 = 640;
 const H: u32 = 360;
+static GPU_AUDIT: Mutex<()> = Mutex::new(());
+
+fn audit(future: impl Future<Output = Result<()>>) -> Result<()> {
+    let _lease: MutexGuard<'static, ()> = GPU_AUDIT.lock().unwrap_or_else(PoisonError::into_inner);
+    pollster::block_on(future)
+}
 
 #[test]
 fn poisoned_water_cells_are_extinguished() -> Result<()> {
-    pollster::block_on(async {
+    audit(async {
         let Some(mut bench) = Bench::make().await? else {
             return Ok(());
         };
@@ -22,16 +35,16 @@ fn poisoned_water_cells_are_extinguished() -> Result<()> {
 
 #[test]
 fn water_guard_resets_poisoned_field() -> Result<()> {
-    pollster::block_on(async {
+    audit(async {
         let Some(mut bench) = Bench::make().await? else {
             return Ok(());
         };
         bench.poison(37, 29)?;
         if bench.field()?.assert_clean().is_ok() {
-            bail!("water poison write did not land");
+            bail!("basin poison write did not land");
         }
         if !bench.guard()? {
-            bail!("water guard did not report a reset");
+            bail!("basin guard did not report a reset");
         }
         let field = bench.field()?;
         field.assert_clean()?;
@@ -41,14 +54,14 @@ fn water_guard_resets_poisoned_field() -> Result<()> {
 
 #[test]
 fn water_guard_resets_saturated_field() -> Result<()> {
-    pollster::block_on(async {
+    audit(async {
         let Some(mut bench) = Bench::make().await? else {
             return Ok(());
         };
         bench.saturate()?;
         bench.field()?.assert_railed(512)?;
         if !bench.guard()? {
-            bail!("water guard did not report a saturated reset");
+            bail!("basin guard did not report a saturated reset");
         }
         let field = bench.field()?;
         field.assert_clean()?;
@@ -57,14 +70,14 @@ fn water_guard_resets_saturated_field() -> Result<()> {
 }
 
 #[test]
-fn clear_water_zeros_persistent_field() -> Result<()> {
-    pollster::block_on(async {
+fn becalm_zeros_every_persistent_field() -> Result<()> {
+    audit(async {
         let Some(mut bench) = Bench::make().await? else {
             return Ok(());
         };
         bench.saturate()?;
         bench.field()?.assert_railed(512)?;
-        bench.frost.clear_water(&bench.queue);
+        bench.engine.becalm(&bench.queue);
         let field = bench.field()?;
         field.assert_clean()?;
         field.assert_quiet(37, 29, 0.25)
@@ -73,13 +86,13 @@ fn clear_water_zeros_persistent_field() -> Result<()> {
 
 #[test]
 fn aggressive_water_script_never_writes_nonfinite_state() -> Result<()> {
-    pollster::block_on(async {
+    audit(async {
         let Some(mut bench) = Bench::make().await? else {
             return Ok(());
         };
         for frame in 0..180 {
             let script = Script::storm(frame);
-            bench.step(&script.surge(frame as f32 / 60.0))?;
+            bench.step(&script.frame(frame as f32 / 60.0))?;
             if frame % 15 == 0 {
                 bench.field()?.assert_clean()?;
             }
@@ -90,13 +103,13 @@ fn aggressive_water_script_never_writes_nonfinite_state() -> Result<()> {
 
 #[test]
 fn overlapping_image_plate_wakes_do_not_rail_field() -> Result<()> {
-    pollster::block_on(async {
+    audit(async {
         let Some(mut bench) = Bench::make().await? else {
             return Ok(());
         };
         for frame in 0..180 {
             let script = Script::spaz(frame);
-            bench.step(&script.very_wet_surge(frame as f32 / 60.0))?;
+            bench.step(&script.very_wet_frame(frame as f32 / 60.0))?;
         }
         let field = bench.field()?;
         field.assert_clean()?;
@@ -106,7 +119,7 @@ fn overlapping_image_plate_wakes_do_not_rail_field() -> Result<()> {
 
 #[test]
 fn water_allocates_half_resolution_field() -> Result<()> {
-    pollster::block_on(async {
+    audit(async {
         let Some(bench) = Bench::make().await? else {
             return Ok(());
         };
@@ -115,31 +128,152 @@ fn water_allocates_half_resolution_field() -> Result<()> {
 }
 
 #[test]
-fn water_dump_writes_forensic_sections() -> Result<()> {
-    pollster::block_on(async {
+fn surfaces_never_share_a_persistent_basin() -> Result<()> {
+    audit(async {
         let Some(mut bench) = Bench::make().await? else {
             return Ok(());
         };
-        let surge = quiet(0.125);
-        bench.step(&surge)?;
+        bench.poison(37, 29)?;
+        if bench.field()?.assert_clean().is_ok() {
+            bail!("poison did not land in the first basin");
+        }
+        let stranger = super::super::surface::SurfaceId(2);
+        let stranger_life = Arc::new(());
+        bench
+            .engine
+            .ensure_basin(&bench.device, &bench.queue, stranger, 0, &stranger_life);
+        let field = bench.field_for(stranger)?;
+        field.assert_clean()?;
+        field.assert_quiet(37, 29, 0.0)
+    })
+}
+
+#[test]
+fn one_submission_keeps_each_surface_forcing() -> Result<()> {
+    audit(async {
+        let Some(mut bench) = Bench::make().await? else {
+            return Ok(());
+        };
+        let stranger = super::super::surface::SurfaceId(2);
+        let stirred = Script::spaz(0).frame(0.0);
+        let quiet = quiet_for(stranger, 0.0);
+        let output = bench.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("basin-audit-output"),
+            size: wgpu::Extent3d {
+                width: W,
+                height: H,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: TARGET_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[TARGET_FORMAT],
+        });
+        let view = output.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder = bench
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("basin-audit-multi-surface"),
+            });
+        bench
+            .engine
+            .compose(&bench.device, &bench.queue, &mut encoder, &view, &stirred);
+        bench
+            .engine
+            .compose(&bench.device, &bench.queue, &mut encoder, &view, &quiet);
+        let ticket = bench.queue.submit([encoder.finish()]);
+        let _drained = bench
+            .device
+            .poll(wgpu::PollType::Wait {
+                submission_index: Some(ticket),
+                timeout: Some(Duration::from_secs(10)),
+            })
+            .context("wait multi-surface composition")?;
+
+        bench.field()?.assert_stirred(0.01)?;
+        bench.field_for(stranger)?.assert_quiet_everywhere(1.0e-6)
+    })
+}
+
+#[test]
+fn surface_generation_erases_only_its_basin() -> Result<()> {
+    audit(async {
+        let Some(mut bench) = Bench::make().await? else {
+            return Ok(());
+        };
+        bench.saturate()?;
+        bench.field()?.assert_railed(512)?;
+        bench
+            .engine
+            .ensure_basin(&bench.device, &bench.queue, bench.surface, 1, &bench.life);
+        let field = bench.field()?;
+        field.assert_clean()?;
+        field.assert_quiet(37, 29, 0.0)
+    })
+}
+
+#[test]
+fn dead_surfaces_relinquish_their_gpu_basins() -> Result<()> {
+    audit(async {
+        let Some(mut bench) = Bench::make().await? else {
+            return Ok(());
+        };
+        let doomed = super::super::surface::SurfaceId(2);
+        let doomed_life = Arc::new(());
+        bench
+            .engine
+            .ensure_basin(&bench.device, &bench.queue, doomed, 0, &doomed_life);
+        drop(doomed_life);
+
+        let survivor = super::super::surface::SurfaceId(3);
+        let survivor_life = Arc::new(());
+        bench
+            .engine
+            .ensure_basin(&bench.device, &bench.queue, survivor, 0, &survivor_life);
+        let basins = &bench
+            .engine
+            .viewport
+            .as_ref()
+            .context("missing water viewport")?
+            .basins;
+        if basins.contains_key(&doomed) {
+            bail!("dead surface retained its GPU basin");
+        }
+        if !basins.contains_key(&survivor) {
+            bail!("live surface lost its GPU basin");
+        }
+        Ok(())
+    })
+}
+
+#[test]
+fn water_dump_writes_forensic_sections() -> Result<()> {
+    audit(async {
+        let Some(mut bench) = Bench::make().await? else {
+            return Ok(());
+        };
+        let frame = quiet(0.125);
+        bench.step(&frame)?;
         let path = std::env::temp_dir().join(format!(
-            "abv-water-dump-test-{}-{}.abvdump",
+            "abv-basin-dump-test-{}-{}.abvdump",
             process::id(),
             W
         ));
         let _gone = fs::remove_file(&path);
         bench
-            .frost
-            .dump_surge(&bench.device, &bench.queue, &path, &surge, [W, H], 1.0)?;
+            .engine
+            .dump(&bench.device, &bench.queue, &path, &frame, [W, H], 1.0)?;
         let blob = fs::read(&path).with_context(|| format!("read {}", path.display()))?;
         fs::remove_file(&path).with_context(|| format!("remove {}", path.display()))?;
         if !blob.starts_with(b"DWEMER_WATER_DUMP\0") {
-            bail!("water dump missing magic header");
+            bail!("basin dump missing magic header");
         }
         for needle in [b"meta.txt".as_slice(), b"water0.rg32f", b"water1.rg32f"] {
             if !blob.windows(needle.len()).any(|window| window == needle) {
                 bail!(
-                    "water dump missing section {}",
+                    "basin dump missing section {}",
                     String::from_utf8_lossy(needle)
                 );
             }
@@ -151,7 +285,9 @@ fn water_dump_writes_forensic_sections() -> Result<()> {
 struct Bench {
     device: wgpu::Device,
     queue: wgpu::Queue,
-    frost: Frost,
+    engine: Engine,
+    surface: super::super::surface::SurfaceId,
+    life: Arc<()>,
 }
 
 impl Bench {
@@ -165,43 +301,58 @@ impl Bench {
         {
             Ok(adapter) => adapter,
             Err(err) => {
-                eprintln!("water audit skipped: no wgpu adapter: {err}");
+                eprintln!("basin audit skipped: no wgpu adapter: {err}");
                 return Ok(None);
             }
         };
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
-                label: Some("water-audit"),
+                label: Some("basin-audit"),
                 ..Default::default()
             })
             .await
-            .context("request water audit device")?;
-        let mut frost = Frost::new(&device, SURFACE);
-        frost.resize(&device, &queue, W, H);
+            .context("request basin audit device")?;
+        let mut engine = Engine::new(&device, TARGET_FORMAT);
+        engine.resize(&device, W, H);
+        let surface = super::super::surface::SurfaceId(1);
+        let life = Arc::new(());
+        engine.ensure_basin(&device, &queue, surface, 0, &life);
         Ok(Some(Self {
             device,
             queue,
-            frost,
+            engine,
+            surface,
+            life,
         }))
     }
 
-    fn step(&mut self, surge: &Surge<'_>) -> Result<()> {
-        let rig = self.frost.rig.as_mut().context("missing frost rig")?;
-        self.queue
-            .write_buffer(&self.frost.mask, 0, &mask_bytes(surge));
+    fn step(&mut self, frame: &Frame) -> Result<()> {
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("water-audit-step"),
+                label: Some("basin-audit-step"),
             });
+        let Engine {
+            pipelines,
+            viewport,
+            ..
+        } = &mut self.engine;
+        let basin = viewport
+            .as_mut()
+            .context("missing water viewport")?
+            .basins
+            .get_mut(&self.surface)
+            .context("missing audit basin")?;
+        self.queue
+            .write_buffer(&basin.uniforms, 0, bytemuck::bytes_of(&uniforms(frame)));
         for _ in 0..SIM_STEPS {
             run_compute(
                 &mut encoder,
-                &self.frost.pipes.sim,
-                &rig.water.sim_bind[rig.water.phase],
-                rig.water.size,
+                &pipelines.sim,
+                &basin.sim_bindings[basin.phase],
+                basin.size,
             );
-            rig.water.phase ^= 1;
+            basin.phase ^= 1;
         }
         let ticket = self.queue.submit([encoder.finish()]);
         let _drained = self
@@ -210,16 +361,16 @@ impl Bench {
                 submission_index: Some(ticket),
                 timeout: Some(Duration::from_secs(10)),
             })
-            .context("wait water audit step")?;
+            .context("wait basin audit step")?;
         Ok(())
     }
 
     fn poison(&mut self, x: u32, y: u32) -> Result<()> {
-        let rig = self.frost.rig.as_ref().context("missing frost rig")?;
+        let basin = self.basin()?;
         let bits = [f32::INFINITY.to_le_bytes(), f32::INFINITY.to_le_bytes()].concat();
         self.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
-                texture: &rig.water.textures[rig.water.phase],
+                texture: &basin.textures[basin.phase],
                 mip_level: 0,
                 origin: wgpu::Origin3d { x, y, z: 0 },
                 aspect: wgpu::TextureAspect::All,
@@ -240,8 +391,8 @@ impl Bench {
     }
 
     fn saturate(&mut self) -> Result<()> {
-        let rig = self.frost.rig.as_ref().context("missing frost rig")?;
-        let size = rig.water.size;
+        let basin = self.basin()?;
+        let size = basin.size;
         let mut bytes = Vec::with_capacity((size.width * size.height * SIM_BYTES) as usize);
         for y in 0..size.height {
             for x in 0..size.width {
@@ -252,7 +403,7 @@ impl Bench {
         }
         self.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
-                texture: &rig.water.textures[rig.water.phase],
+                texture: &basin.textures[basin.phase],
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
@@ -269,25 +420,45 @@ impl Bench {
     }
 
     fn field(&self) -> Result<Field> {
-        let rig = self.frost.rig.as_ref().context("missing frost rig")?;
-        Field::read(&self.device, &self.queue, &rig.water)
+        self.field_for(self.surface)
+    }
+
+    fn field_for(&self, surface: super::super::surface::SurfaceId) -> Result<Field> {
+        let basin = self
+            .engine
+            .viewport
+            .as_ref()
+            .context("missing water viewport")?
+            .basins
+            .get(&surface)
+            .context("missing audit basin")?;
+        Field::read(&self.device, &self.queue, basin)
     }
 
     fn guard(&mut self) -> Result<bool> {
-        let rig = self.frost.rig.as_ref().context("missing frost rig")?;
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("water-audit-guard"),
+                label: Some("basin-audit-guard"),
             });
-        self.frost
-            .sentinel
-            .encode(&self.device, &mut encoder, &rig.water);
+        let surface = self.surface;
+        let basin = self
+            .engine
+            .viewport
+            .as_mut()
+            .context("missing water viewport")?
+            .basins
+            .get_mut(&surface)
+            .context("missing audit basin")?;
+        basin.sentinel.encode(
+            &self.device,
+            &mut encoder,
+            basin.size,
+            &basin.textures[basin.phase],
+        );
         let submitted = self.queue.submit([encoder.finish()]);
-        if self
-            .frost
-            .after_submit_guard(&self.device, &self.queue, true)
-        {
+        let frame = quiet_for(surface, 0.0);
+        if self.engine.after_submit(&self.device, &self.queue, &frame) {
             return Ok(true);
         }
         for _ in 0..20 {
@@ -297,11 +468,8 @@ impl Bench {
                     submission_index: Some(submitted.clone()),
                     timeout: Some(Duration::from_millis(50)),
                 })
-                .context("wait water guard readback")?;
-            if self
-                .frost
-                .after_submit_guard(&self.device, &self.queue, true)
-            {
+                .context("wait basin guard readback")?;
+            if self.engine.after_submit(&self.device, &self.queue, &frame) {
                 return Ok(true);
             }
         }
@@ -309,16 +477,25 @@ impl Bench {
     }
 
     fn assert_size(&self, width: u32, height: u32) -> Result<()> {
-        let rig = self.frost.rig.as_ref().context("missing frost rig")?;
-        let size = rig.water.size;
+        let size = self.basin()?.size;
         if (size.width, size.height) != (width, height) {
             bail!(
-                "water is {}×{}, expected {width}×{height}",
+                "basin is {}×{}, expected {width}×{height}",
                 size.width,
                 size.height
             );
         }
         Ok(())
+    }
+
+    fn basin(&self) -> Result<&Basin> {
+        self.engine
+            .viewport
+            .as_ref()
+            .context("missing water viewport")?
+            .basins
+            .get(&self.surface)
+            .context("missing audit basin")
     }
 }
 
@@ -328,22 +505,22 @@ struct Field {
 }
 
 impl Field {
-    fn read(device: &wgpu::Device, queue: &wgpu::Queue, water: &Water) -> Result<Self> {
-        let row = water.size.width * SIM_BYTES;
+    fn read(device: &wgpu::Device, queue: &wgpu::Queue, basin: &Basin) -> Result<Self> {
+        let row = basin.size.width * SIM_BYTES;
         let pitch =
             row.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
         let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("water-audit-readback"),
-            size: u64::from(pitch) * u64::from(water.size.height),
+            label: Some("basin-audit-readback"),
+            size: u64::from(pitch) * u64::from(basin.size.height),
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("water-audit-readback"),
+            label: Some("basin-audit-readback"),
         });
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
-                texture: &water.textures[water.phase],
+                texture: &basin.textures[basin.phase],
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
@@ -353,10 +530,10 @@ impl Field {
                 layout: wgpu::TexelCopyBufferLayout {
                     offset: 0,
                     bytes_per_row: Some(pitch),
-                    rows_per_image: Some(water.size.height),
+                    rows_per_image: Some(basin.size.height),
                 },
             },
-            water.size,
+            basin.size,
         );
         let ticket = queue.submit([encoder.finish()]);
         let slice = buffer.slice(..);
@@ -369,13 +546,13 @@ impl Field {
                 submission_index: Some(ticket),
                 timeout: Some(Duration::from_secs(10)),
             })
-            .context("wait water audit readback")?;
+            .context("wait basin audit readback")?;
         rx.recv_timeout(Duration::from_secs(10))
-            .context("receive water audit map result")?
-            .context("map water audit readback")?;
+            .context("receive basin audit map result")?
+            .context("map basin audit readback")?;
         let view = slice.get_mapped_range();
-        let mut bytes = Vec::with_capacity((row * water.size.height) as usize);
-        for y in 0..water.size.height {
+        let mut bytes = Vec::with_capacity((row * basin.size.height) as usize);
+        for y in 0..basin.size.height {
             let start = (y * pitch) as usize;
             bytes.extend_from_slice(&view[start..start + row as usize]);
         }
@@ -383,7 +560,7 @@ impl Field {
         buffer.unmap();
         Ok(Self {
             bytes,
-            width: water.size.width,
+            width: basin.size.width,
         })
     }
 
@@ -395,7 +572,7 @@ impl Field {
                     f32::from_le_bytes([chunk[at], chunk[at + 1], chunk[at + 2], chunk[at + 3]]);
                 if !value.is_finite() {
                     bail!(
-                        "nonfinite f32 in water field at ({}, {}), channel {}, bits=0x{:08x}",
+                        "nonfinite f32 in basin field at ({}, {}), channel {}, bits=0x{:08x}",
                         cell as u32 % self.width,
                         cell as u32 / self.width,
                         channel,
@@ -453,24 +630,63 @@ impl Field {
         }
         Ok(())
     }
+
+    fn assert_stirred(&self, floor: f32) -> Result<()> {
+        let peak = self
+            .bytes
+            .chunks_exact(SIM_BYTES as usize)
+            .flat_map(|cell| [channel(cell, 0).abs(), channel(cell, 1).abs()])
+            .fold(0.0_f32, f32::max);
+        if peak <= floor {
+            bail!("basin peak {peak} did not exceed {floor}");
+        }
+        Ok(())
+    }
+
+    fn assert_quiet_everywhere(&self, ceiling: f32) -> Result<()> {
+        let peak = self
+            .bytes
+            .chunks_exact(SIM_BYTES as usize)
+            .flat_map(|cell| [channel(cell, 0).abs(), channel(cell, 1).abs()])
+            .fold(0.0_f32, f32::max);
+        if peak > ceiling {
+            bail!("quiet basin peak {peak} exceeded {ceiling}");
+        }
+        Ok(())
+    }
 }
 
-fn quiet(tide: f32) -> Surge<'static> {
-    Surge {
+fn channel(cell: &[u8], channel: usize) -> f32 {
+    let at = channel * 4;
+    f32::from_le_bytes([cell[at], cell[at + 1], cell[at + 2], cell[at + 3]])
+}
+
+fn quiet(tide: f32) -> Frame {
+    quiet_for(super::super::surface::SurfaceId(1), tide)
+}
+
+fn quiet_for(surface: super::super::surface::SurfaceId, tide: f32) -> Frame {
+    Frame {
+        surface,
+        life: Arc::new(()),
+        generation: 0,
         dry: false,
         veil: None,
-        tensions: &[],
-        lifts: &[],
-        water: water_rect(),
+        tensions: Vec::new(),
+        lifts: Vec::new(),
+        domain: Domain {
+            rect: water_rect(),
+            enclosed: 0.0,
+        },
         scroll_tilt: 0.0,
-        splashes: &[],
+        splashes: Vec::new(),
         raft: None,
-        floor: far_rect(),
+        floor: Floor::NONE,
         viewer: far_rect(),
-        touches: &[],
+        touches: Vec::new(),
         wake: true,
         tide,
-        brine: Brine::default(),
+        chemistry: Chemistry::default(),
         guard: true,
     }
 }
@@ -565,45 +781,57 @@ impl Script {
         }
     }
 
-    fn surge(&self, tide: f32) -> Surge<'_> {
-        Surge {
+    fn frame(&self, tide: f32) -> Frame {
+        Frame {
+            surface: super::super::surface::SurfaceId(1),
+            life: Arc::new(()),
+            generation: 0,
             dry: false,
             veil: None,
-            tensions: &self.tensions,
-            lifts: &self.lifts,
-            water: water_rect(),
+            tensions: self.tensions.clone(),
+            lifts: self.lifts.clone(),
+            domain: Domain {
+                rect: water_rect(),
+                enclosed: 0.0,
+            },
             scroll_tilt: ((tide * 2.3).sin() * 14.0).clamp(-18.0, 18.0),
-            splashes: &self.splashes,
+            splashes: self.splashes.clone(),
             raft: self.raft,
-            floor: far_rect(),
+            floor: Floor::NONE,
             viewer: far_rect(),
-            touches: &[],
+            touches: Vec::new(),
             wake: true,
             tide,
-            brine: Brine::default(),
+            chemistry: Chemistry::default(),
             guard: true,
         }
     }
 
-    fn very_wet_surge(&self, tide: f32) -> Surge<'_> {
-        let mut brine = Brine::default();
-        brine.wave_damp *= 2.0;
-        brine.height_retention = 1.0 - (1.0 - brine.height_retention) / 2.0;
-        Surge {
+    fn very_wet_frame(&self, tide: f32) -> Frame {
+        let mut chemistry = Chemistry::default();
+        chemistry.wave_damp *= 2.0;
+        chemistry.height_retention = 1.0 - (1.0 - chemistry.height_retention) / 2.0;
+        Frame {
+            surface: super::super::surface::SurfaceId(1),
+            life: Arc::new(()),
+            generation: 0,
             dry: false,
             veil: None,
-            tensions: &self.tensions,
-            lifts: &self.lifts,
-            water: water_rect(),
+            tensions: self.tensions.clone(),
+            lifts: self.lifts.clone(),
+            domain: Domain {
+                rect: water_rect(),
+                enclosed: 0.0,
+            },
             scroll_tilt: 0.0,
-            splashes: &self.splashes,
+            splashes: self.splashes.clone(),
             raft: self.raft,
-            floor: far_rect(),
+            floor: Floor::NONE,
             viewer: far_rect(),
-            touches: &[],
+            touches: Vec::new(),
             wake: true,
             tide,
-            brine,
+            chemistry,
             guard: true,
         }
     }

@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use super::gpu;
+use super::engine;
 
 const RAFT_RATE: f32 = 1.7;
 const RAFT_RISE: Duration = Duration::from_millis(70);
@@ -15,8 +15,8 @@ const DRAIN_AMP_MIN: f32 = -0.52;
 const DRAIN_AMP_SPAN: f32 = -0.48;
 
 pub(super) struct DrainPulse {
-    pub rect: egui::Rect,
-    pub amp: f32,
+    pub(super) rect: egui::Rect,
+    pub(super) amp: f32,
 }
 
 /// A bilinear high-tension membrane pulled by four independent Poisson pistons.
@@ -28,7 +28,7 @@ pub(super) struct LoadingRaft {
 }
 
 impl LoadingRaft {
-    pub fn new() -> Self {
+    pub(super) fn new() -> Self {
         let now = Instant::now();
         let mut raft = Self {
             rect: egui::Rect::NOTHING,
@@ -43,29 +43,29 @@ impl LoadingRaft {
         raft
     }
 
-    pub fn show(&mut self, ctx: &egui::Context, rect: egui::Rect) {
+    pub(super) fn show(&mut self, ctx: &egui::Context, rect: egui::Rect) {
         self.visible = true;
         self.rect = rect;
         self.tick(Instant::now());
         ctx.request_repaint_after(Duration::from_millis(16));
     }
 
-    pub fn hide(&mut self) {
+    pub(super) fn hide(&mut self) {
         self.visible = false;
     }
 
-    pub fn source(
+    pub(super) fn source(
         &mut self,
         ctx: &egui::Context,
         pixels_per_point: f32,
         amplitude: f32,
-    ) -> Option<gpu::Raft> {
+    ) -> Option<engine::Raft> {
         if !self.visible {
             return None;
         }
         self.tick(Instant::now());
         ctx.request_repaint_after(Duration::from_millis(16));
-        Some(gpu::Raft {
+        Some(engine::Raft {
             rect: scale_rect(self.rect, pixels_per_point),
             corners: self
                 .corners
@@ -144,7 +144,7 @@ pub(super) struct EmptyDrain {
 }
 
 impl EmptyDrain {
-    pub fn new() -> Self {
+    pub(super) fn new() -> Self {
         let now = Instant::now();
         let mut drain = Self {
             cells: [now; DRAIN_CELLS],
@@ -157,7 +157,7 @@ impl EmptyDrain {
         drain
     }
 
-    pub fn show(&mut self, ctx: &egui::Context, rect: egui::Rect) -> Vec<DrainPulse> {
+    pub(super) fn show(&mut self, ctx: &egui::Context, rect: egui::Rect) -> Vec<DrainPulse> {
         self.visible = true;
         let now = Instant::now();
         let mut pulses = Vec::new();
@@ -175,7 +175,7 @@ impl EmptyDrain {
         pulses
     }
 
-    pub fn hide(&mut self) {
+    pub(super) fn hide(&mut self) {
         if !self.visible {
             return;
         }

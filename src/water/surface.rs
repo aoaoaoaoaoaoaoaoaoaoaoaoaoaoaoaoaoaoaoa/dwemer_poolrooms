@@ -1,10 +1,14 @@
 use std::{
     hash::Hash,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
 
 use super::{
-    gpu,
+    engine,
     machines::{EmptyDrain, LoadingRaft, scale_rect},
 };
 
@@ -17,6 +21,16 @@ const TILT_TELEPORT: f32 = 2500.0;
 const TILT_SPEED_CEIL: f32 = 14_000.0;
 const FORCE_CEIL: f32 = 48.0;
 const FORCE_EPSILON: f32 = 0.015;
+static NEXT_SURFACE_ID: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(super) struct SurfaceId(pub(super) u64);
+
+impl SurfaceId {
+    fn mint() -> Self {
+        Self(NEXT_SURFACE_ID.fetch_add(1, Ordering::Relaxed))
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum Wetness {
@@ -98,7 +112,7 @@ impl Default for Agitation {
 }
 
 /// A freely placed excitation. Amplitudes are canonical and are scaled by the
-/// table's current wetness; ages, capacity, and GPU representation stay private.
+/// surface's current wetness; ages, capacity, and GPU representation stay private.
 #[derive(Clone, Copy, Debug)]
 pub enum Poke {
     Ring { impulse: f32 },
@@ -121,20 +135,21 @@ impl Poke {
         Self::Jitter { impulse }
     }
 
-    fn vitals(self) -> (f32, gpu::SplashShape, f32) {
+    fn vitals(self) -> (f32, engine::SplashShape, f32) {
         match self {
-            Self::Ring { impulse } => (impulse, gpu::SplashShape::Ring, 0.0),
-            Self::Basin { impulse } => (impulse, gpu::SplashShape::Basin, 0.0),
-            Self::Drag { impulse, travel } => (impulse, gpu::SplashShape::Ring, travel),
-            Self::Jitter { impulse } => (impulse, gpu::SplashShape::Jitter, 0.0),
+            Self::Ring { impulse } => (impulse, engine::SplashShape::Ring, 0.0),
+            Self::Basin { impulse } => (impulse, engine::SplashShape::Basin, 0.0),
+            Self::Drag { impulse, travel } => (impulse, engine::SplashShape::Ring, travel),
+            Self::Jitter { impulse } => (impulse, engine::SplashShape::Jitter, 0.0),
         }
     }
 }
 
 #[derive(Clone, Copy, Debug)]
 pub struct Cut {
-    pub rect: egui::Rect,
-    pub radius: f32,
+    rect: egui::Rect,
+    radius: f32,
+    barrier: bool,
 }
 
 impl Cut {
@@ -144,12 +159,102 @@ impl Cut {
             max: egui::Pos2 { x: -4e6, y: -4e6 },
         },
         radius: 0.0,
+        barrier: false,
     };
 
-    fn physical(self, scale: f32) -> gpu::Cut {
-        gpu::Cut {
+    /// A sharp optical aperture occupied by solid foreground geometry.
+    pub const fn barrier(rect: egui::Rect, radius: f32) -> Self {
+        Self {
+            rect,
+            radius,
+            barrier: true,
+        }
+    }
+
+    /// A sharp optical aperture through which the active basin remains visible.
+    pub const fn aperture(rect: egui::Rect, radius: f32) -> Self {
+        Self {
+            rect,
+            radius,
+            barrier: false,
+        }
+    }
+
+    fn physical(self, scale: f32) -> engine::Cut {
+        engine::Cut {
             rect: scale_rect(self.rect, scale),
             radius: self.radius * scale,
+            barrier: if self.barrier { 1.0 } else { 0.0 },
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DomainKind {
+    Shelf,
+    Basin,
+}
+
+/// The physical extent and boundary law of one water world.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Domain {
+    rect: egui::Rect,
+    kind: DomainKind,
+}
+
+/// A visible substrate beneath the water. Depth controls optical extinction,
+/// not solver geometry: both modes receive the same refractive field.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Floor {
+    rect: egui::Rect,
+    depth: f32,
+}
+
+impl Floor {
+    /// Lamplit tile near the surface, used while the gallery is empty.
+    pub const fn shallow(rect: egui::Rect) -> Self {
+        Self { rect, depth: 0.0 }
+    }
+
+    /// The same tile sunk into darker water, suitable for enclosed basins.
+    pub const fn deep(rect: egui::Rect) -> Self {
+        Self { rect, depth: 0.68 }
+    }
+
+    fn physical(self, scale: f32) -> engine::Floor {
+        engine::Floor {
+            rect: scale_rect(self.rect, scale),
+            depth: self.depth,
+        }
+    }
+}
+
+impl Domain {
+    /// Deep water beginning at `rect.min.x`, with transmitted shallows to its
+    /// left and the viewport edges as the outer walls.
+    pub const fn shelf(rect: egui::Rect) -> Self {
+        Self {
+            rect,
+            kind: DomainKind::Shelf,
+        }
+    }
+
+    /// A closed rectangular basin whose four edges reflect the field.
+    pub const fn basin(rect: egui::Rect) -> Self {
+        Self {
+            rect,
+            kind: DomainKind::Basin,
+        }
+    }
+
+    fn physical(self, scale: f32) -> engine::Domain {
+        engine::Domain {
+            rect: scale_rect(self.rect, scale),
+            enclosed: if self.kind == DomainKind::Basin {
+                1.0
+            } else {
+                0.0
+            },
         }
     }
 }
@@ -163,8 +268,8 @@ pub struct Veil {
 }
 
 impl Veil {
-    fn physical(self, scale: f32) -> gpu::Veil {
-        gpu::Veil {
+    fn physical(self, scale: f32) -> engine::Veil {
+        engine::Veil {
             cuts: self.cuts.map(|cut| cut.physical(scale)),
             strength: self.strength,
             dim: self.dim,
@@ -183,7 +288,7 @@ struct Plunge {
     rect: egui::Rect,
     born: Instant,
     amp: f32,
-    shape: gpu::SplashShape,
+    shape: engine::SplashShape,
     drag: f32,
 }
 
@@ -203,8 +308,8 @@ struct Quiver {
 }
 
 impl Quiver {
-    fn physical(self, scale: f32) -> gpu::Tension {
-        gpu::Tension {
+    fn physical(self, scale: f32) -> engine::Tension {
+        engine::Tension {
             rect: scale_rect(self.rect, scale),
             pointer: (self.pointer.to_vec2() * scale).to_pos2(),
             grip: self.grip,
@@ -253,14 +358,17 @@ impl TrayTilt {
     }
 }
 
-/// The application-facing water table. It owns all interaction history,
-/// oscillators, lifetimes, scaling, wake policy, and shader packing.
-pub struct WaterTable {
+/// One application-facing water world. It owns forcing history, oscillators,
+/// lifetimes, scaling, wake policy, and the identity of its persistent basin.
+pub struct Surface {
+    id: SurfaceId,
+    life: Arc<()>,
+    generation: u64,
     wetness: Wetness,
-    chemistry: gpu::Brine,
+    chemistry: engine::Chemistry,
     agitation: Agitation,
-    domain: egui::Rect,
-    floor: egui::Rect,
+    domain: Domain,
+    floor: Option<Floor>,
     active_lift: Option<(u64, egui::Rect)>,
     lift_plates: Vec<LiftPlate>,
     lift_memo: Option<(u64, egui::Rect)>,
@@ -279,21 +387,24 @@ pub struct WaterTable {
     epoch: Instant,
 }
 
-impl Default for WaterTable {
+impl Default for Surface {
     fn default() -> Self {
         Self::new(Wetness::Wet)
     }
 }
 
-impl WaterTable {
+impl Surface {
     pub fn new(wetness: Wetness) -> Self {
         let now = Instant::now();
         Self {
+            id: SurfaceId::mint(),
+            life: Arc::new(()),
+            generation: 0,
             wetness,
-            chemistry: gpu::Brine::default(),
+            chemistry: engine::Chemistry::default(),
             agitation: Agitation::default(),
-            domain: egui::Rect::ZERO,
-            floor: egui::Rect::ZERO,
+            domain: Domain::shelf(egui::Rect::ZERO),
+            floor: None,
             active_lift: None,
             lift_plates: Vec::new(),
             lift_memo: None,
@@ -333,7 +444,7 @@ impl WaterTable {
     }
 
     /// Borrow both halves of the live calibration surface without exposing
-    /// the table's temporal machinery.
+    /// its temporal machinery.
     pub fn laboratory_mut(&mut self) -> (&mut super::Chemistry, &mut Agitation) {
         (&mut self.chemistry, &mut self.agitation)
     }
@@ -344,21 +455,46 @@ impl WaterTable {
     }
 
     pub fn domain(&self) -> egui::Rect {
-        self.domain
+        self.domain.rect
     }
 
-    /// Start one UI pass over the table and declare its deep-water rectangle.
-    pub fn begin_surface(&mut self, domain: egui::Rect) {
+    /// Start one UI pass and declare this world's physical domain.
+    pub fn begin(&mut self, domain: Domain) {
         self.domain = domain;
         self.active_lift = None;
+    }
+
+    /// Erase this world's CPU forcing history and its persistent GPU basin on
+    /// the next composition without disturbing its calibrated laws.
+    pub fn reset(&mut self) {
+        let now = Instant::now();
+        self.generation = self.generation.wrapping_add(1);
+        self.domain = Domain::shelf(egui::Rect::ZERO);
+        self.floor = None;
+        self.active_lift = None;
+        self.lift_plates.clear();
+        self.lift_memo = None;
+        self.plunges.clear();
+        self.pond_open = false;
+        self.pond = far_rect();
+        self.touches.clear();
+        self.loading.hide();
+        self.drain.hide();
+        self.scroll = TrayTilt::default();
+        self.scroll_tilt = 0.0;
+        self.water_until = None;
+        self.quivers.clear();
+        self.quiver_tick = now;
+        self.quiver_until = None;
+        self.epoch = now;
     }
 
     pub fn hover(&mut self, id: impl Hash, rect: egui::Rect) {
         self.active_lift = Some((egui::Id::new(id).value(), rect));
     }
 
-    pub fn set_floor(&mut self, floor: Option<egui::Rect>) {
-        self.floor = floor.unwrap_or(egui::Rect::ZERO);
+    pub fn set_floor(&mut self, floor: Option<Floor>) {
+        self.floor = floor;
     }
 
     /// Start one UI pass for an optional bounded pond. Touches outside an open
@@ -382,7 +518,7 @@ impl WaterTable {
     }
 
     pub fn touch(&mut self, center: egui::Pos2) {
-        if self.touches.len() >= gpu::TOUCH_SLOTS {
+        if self.touches.len() >= engine::TOUCH_SLOTS {
             let _oldest = self.touches.remove(0);
         }
         self.touches.push(TouchPlunge {
@@ -393,7 +529,7 @@ impl WaterTable {
         self.arm();
     }
 
-    /// Place an excitation anywhere on the table in logical egui coordinates.
+    /// Place an excitation anywhere on the surface in logical egui coordinates.
     pub fn poke(&mut self, rect: egui::Rect, poke: Poke) {
         let (amp, shape, drag) = poke.vitals();
         self.poke_scaled(rect, amp * self.wetness.drench().wave, shape, drag);
@@ -433,14 +569,14 @@ impl WaterTable {
             self.poke_scaled(
                 wake.rect,
                 raw * self.wetness.drench().glyph,
-                gpu::SplashShape::Ring,
+                engine::SplashShape::Ring,
                 0.0,
             );
         }
     }
 
     pub fn heave(&mut self, ctx: &egui::Context, offset: f32) {
-        if !self.domain.is_positive() {
+        if !self.domain.rect.is_positive() {
             self.scroll_tilt = 0.0;
             return;
         }
@@ -497,7 +633,7 @@ impl WaterTable {
         let splashes = self
             .plunges
             .iter()
-            .map(|p| gpu::Splash {
+            .map(|p| engine::Splash {
                 rect: scale_rect(p.rect, pixels_per_point),
                 age: p.born.elapsed().as_secs_f32(),
                 amp: p.amp,
@@ -519,7 +655,7 @@ impl WaterTable {
             .iter()
             .map(|t| {
                 let age = t.born.elapsed().as_secs_f32();
-                gpu::Touch {
+                engine::Touch {
                     center: (t.center.to_vec2() * pixels_per_point).to_pos2(),
                     age,
                     amp: t.amp * retire(age, life),
@@ -549,21 +685,26 @@ impl WaterTable {
         if repaint {
             ctx.request_repaint();
         }
-        let domain = if self.domain.is_positive() {
+        let domain = if self.domain.rect.is_positive() {
             self.domain
         } else {
-            ctx.content_rect()
+            Domain::shelf(ctx.content_rect())
         };
         Frame {
+            surface: self.id,
+            life: Arc::clone(&self.life),
+            generation: self.generation,
             dry: self.wetness == Wetness::Dry,
             veil: veil.map(|v| v.physical(pixels_per_point)),
             tensions,
             lifts,
-            water: scale_rect(domain, pixels_per_point),
+            domain: domain.physical(pixels_per_point),
             scroll_tilt: self.scroll_tilt,
             splashes,
             raft,
-            floor: scale_rect(self.floor, pixels_per_point),
+            floor: self.floor.map_or(engine::Floor::NONE, |floor| {
+                floor.physical(pixels_per_point)
+            }),
             viewer: scale_rect(self.pond, pixels_per_point),
             touches,
             wake: repaint,
@@ -573,11 +714,11 @@ impl WaterTable {
         }
     }
 
-    fn poke_scaled(&mut self, rect: egui::Rect, amp: f32, shape: gpu::SplashShape, drag: f32) {
+    fn poke_scaled(&mut self, rect: egui::Rect, amp: f32, shape: engine::SplashShape, drag: f32) {
         if amp.abs() <= f32::EPSILON {
             return;
         }
-        if self.plunges.len() >= gpu::SPLASH_SLOTS {
+        if self.plunges.len() >= engine::SPLASH_SLOTS {
             let victim = self
                 .plunges
                 .iter()
@@ -635,18 +776,18 @@ impl WaterTable {
         }
         self.lift_plates
             .retain(|plate| plate.grip > 0.002 || active_id == Some(plate.id));
-        if self.lift_plates.len() > gpu::LIFT_SLOTS {
+        if self.lift_plates.len() > engine::LIFT_SLOTS {
             self.lift_plates.sort_by(|a, b| b.grip.total_cmp(&a.grip));
-            self.lift_plates.truncate(gpu::LIFT_SLOTS);
+            self.lift_plates.truncate(engine::LIFT_SLOTS);
         }
         if animating {
             ctx.request_repaint();
         }
     }
 
-    fn physical_lifts(&self, scale: f32, tooltip_rects: &[egui::Rect]) -> Vec<gpu::Lift> {
+    fn physical_lifts(&self, scale: f32, tooltip_rects: &[egui::Rect]) -> Vec<engine::Lift> {
         let tooltip_slots = tooltip_rects.len().min(1);
-        let image_slots = gpu::LIFT_SLOTS.saturating_sub(tooltip_slots);
+        let image_slots = engine::LIFT_SLOTS.saturating_sub(tooltip_slots);
         let mut plates = self
             .lift_plates
             .iter()
@@ -656,14 +797,14 @@ impl WaterTable {
         let mut lifts = plates
             .into_iter()
             .take(image_slots)
-            .map(|p| gpu::Lift::surface(scale_rect(p.rect, scale), p.grip))
+            .map(|p| engine::Lift::surface(scale_rect(p.rect, scale), p.grip))
             .collect::<Vec<_>>();
         lifts.extend(
             tooltip_rects
                 .iter()
                 .take(tooltip_slots)
                 .copied()
-                .map(|rect| gpu::Lift::shallow(scale_rect(rect, scale), TOOLTIP_GRIP)),
+                .map(|rect| engine::Lift::shallow(scale_rect(rect, scale), TOOLTIP_GRIP)),
         );
         lifts
     }
@@ -672,20 +813,23 @@ impl WaterTable {
 /// Opaque, renderer-ready snapshot. Consumers can inspect scheduling only;
 /// shader capacity and packing are deliberately inaccessible.
 pub struct Frame {
+    pub(super) surface: SurfaceId,
+    pub(super) life: Arc<()>,
+    pub(super) generation: u64,
     pub(super) dry: bool,
-    pub(super) veil: Option<gpu::Veil>,
-    pub(super) tensions: Vec<gpu::Tension>,
-    pub(super) lifts: Vec<gpu::Lift>,
-    pub(super) water: egui::Rect,
+    pub(super) veil: Option<engine::Veil>,
+    pub(super) tensions: Vec<engine::Tension>,
+    pub(super) lifts: Vec<engine::Lift>,
+    pub(super) domain: engine::Domain,
     pub(super) scroll_tilt: f32,
-    pub(super) splashes: Vec<gpu::Splash>,
-    pub(super) raft: Option<gpu::Raft>,
-    pub(super) floor: egui::Rect,
+    pub(super) splashes: Vec<engine::Splash>,
+    pub(super) raft: Option<engine::Raft>,
+    pub(super) floor: engine::Floor,
     pub(super) viewer: egui::Rect,
-    pub(super) touches: Vec<gpu::Touch>,
+    pub(super) touches: Vec<engine::Touch>,
     pub(super) wake: bool,
     pub(super) tide: f32,
-    pub(super) chemistry: gpu::Brine,
+    pub(super) chemistry: engine::Chemistry,
     pub(super) guard: bool,
 }
 
@@ -700,24 +844,13 @@ impl Frame {
         self.wake
     }
 
-    pub(super) fn surge(&self) -> gpu::Surge<'_> {
-        gpu::Surge {
-            dry: self.dry,
-            veil: self.veil,
-            tensions: &self.tensions,
-            lifts: &self.lifts,
-            water: self.water,
-            scroll_tilt: self.scroll_tilt,
-            splashes: &self.splashes,
-            raft: self.raft,
-            floor: self.floor,
-            viewer: self.viewer,
-            touches: &self.touches,
-            wake: self.wake,
-            tide: self.tide,
-            brine: self.chemistry,
-            guard: self.guard,
-        }
+    pub(super) fn sim_live(&self) -> bool {
+        !self.dry
+            && (!self.tensions.is_empty()
+                || !self.lifts.is_empty()
+                || !self.splashes.is_empty()
+                || self.raft.is_some()
+                || self.wake)
     }
 }
 
@@ -727,7 +860,7 @@ fn take_tensions(
     bank: &mut Vec<Quiver>,
     then: &mut Instant,
     release: f32,
-) -> Vec<gpu::Tension> {
+) -> Vec<engine::Tension> {
     let now = Instant::now();
     let dt = now.duration_since(*then).as_secs_f32().clamp(0.0, 0.12);
     *then = now;
@@ -755,13 +888,13 @@ fn take_tensions(
     bank.retain(|q| q.grip > QUIVER_EPSILON);
     bank.sort_by(|a, b| b.grip.total_cmp(&a.grip));
     bank.iter()
-        .take(gpu::QUIVER_SLOTS)
+        .take(engine::QUIVER_SLOTS)
         .copied()
         .map(|q| q.physical(scale))
         .collect()
 }
 
-fn scaled_chemistry(mut chemistry: gpu::Brine, wetness: Wetness) -> gpu::Brine {
+fn scaled_chemistry(mut chemistry: engine::Chemistry, wetness: Wetness) -> engine::Chemistry {
     let drench = wetness.drench();
     chemistry.refract_px *= drench.optics;
     chemistry.ior_spread *= drench.optics;
@@ -795,29 +928,29 @@ mod tests {
 
     #[test]
     fn arbitrary_pokes_hide_shader_capacity() {
-        let mut table = WaterTable::default();
+        let mut surface = Surface::default();
         let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(10.0, 10.0));
-        for i in 0..(gpu::SPLASH_SLOTS * 3) {
-            table.poke(rect, Poke::ring(i as f32 + 1.0));
+        for i in 0..(engine::SPLASH_SLOTS * 3) {
+            surface.poke(rect, Poke::ring(i as f32 + 1.0));
         }
-        assert_eq!(table.plunges.len(), gpu::SPLASH_SLOTS);
+        assert_eq!(surface.plunges.len(), engine::SPLASH_SLOTS);
         assert!(
-            table
+            surface
                 .plunges
                 .iter()
-                .all(|p| p.amp >= (gpu::SPLASH_SLOTS * 2) as f32)
+                .all(|p| p.amp >= (engine::SPLASH_SLOTS * 2) as f32)
         );
     }
 
     #[test]
     fn wetness_scales_chemistry_without_mutating_laboratory_values() {
-        let table = WaterTable::new(Wetness::Deluge);
-        let scaled = scaled_chemistry(*table.chemistry(), table.wetness());
+        let surface = Surface::new(Wetness::Deluge);
+        let scaled = scaled_chemistry(*surface.chemistry(), surface.wetness());
         assert_eq!(
-            table.chemistry().refract_px,
-            gpu::Brine::default().refract_px
+            surface.chemistry().refract_px,
+            engine::Chemistry::default().refract_px
         );
-        assert_eq!(scaled.refract_px, table.chemistry().refract_px * 2.0);
+        assert_eq!(scaled.refract_px, surface.chemistry().refract_px * 2.0);
         assert!((scaled.tremor_omega - 0.9 * std::f32::consts::TAU).abs() < 1e-5);
     }
 

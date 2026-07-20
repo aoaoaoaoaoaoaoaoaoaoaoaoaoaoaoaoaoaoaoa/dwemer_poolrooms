@@ -5,13 +5,13 @@
 
 use dwemer_poolrooms::{
     chrome, egui,
-    water::{Poke, WaterTable, Wetness},
+    water::{Domain, Poke, Surface, Wetness},
 };
 
 fn main() {
     let ctx = egui::Context::default();
     chrome::install(&ctx);
-    let mut water = WaterTable::new(Wetness::Wet);
+    let mut water = Surface::new(Wetness::Wet);
     let mut account = "name@example.com".to_owned();
     let output = ctx.run_ui(
         egui::RawInput {
@@ -22,7 +22,7 @@ fn main() {
             ..egui::RawInput::default()
         },
         |ui| {
-            water.begin_surface(ui.max_rect());
+            water.begin(Domain::shelf(ui.max_rect()));
             let _title = ui.label(chrome::title("REMINDERS LOGIN"));
             let _account = ui.text_edit_singleline(&mut account);
             let login = chrome::glyph(ui, "LOGIN", false);

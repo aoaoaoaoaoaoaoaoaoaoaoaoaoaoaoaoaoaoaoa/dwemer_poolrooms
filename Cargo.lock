@@ -189,9 +189,10 @@ dependencies = [
 
 [[package]]
 name = "dwemer_poolrooms"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
+ "bytemuck",
  "egui",
  "egui-wgpu",
  "pollster",

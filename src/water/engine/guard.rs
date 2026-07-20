@@ -24,17 +24,18 @@ impl Sentinel {
         &mut self,
         device: &wgpu::Device,
         encoder: &mut wgpu::CommandEncoder,
-        water: &Water,
+        size: wgpu::Extent3d,
+        texture: &wgpu::Texture,
     ) {
         let now = Instant::now();
         if self.probe.is_some() || self.next.is_some_and(|next| next > now) {
             return;
         }
         self.next = now.checked_add(PERIOD);
-        let readback = Readback::new(device, water.size);
+        let readback = Readback::new(device, size);
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
-                texture: &water.textures[water.phase],
+                texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
@@ -44,10 +45,10 @@ impl Sentinel {
                 layout: wgpu::TexelCopyBufferLayout {
                     offset: 0,
                     bytes_per_row: Some(readback.pitch),
-                    rows_per_image: Some(water.size.height),
+                    rows_per_image: Some(size.height),
                 },
             },
-            water.size,
+            size,
         );
         self.probe = Some(Probe::Copied {
             readback,
@@ -55,12 +56,7 @@ impl Sentinel {
         });
     }
 
-    pub(super) fn after_submit(
-        &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        water: &Water,
-    ) -> bool {
+    pub(super) fn after_submit(&mut self, device: &wgpu::Device) -> bool {
         self.arm_mapping();
         let _polled = device.poll(wgpu::PollType::Poll);
         let Some(Probe::Mapping(mapping)) = &self.probe else {
@@ -74,7 +70,6 @@ impl Sentinel {
                 };
                 if let Some(fault) = mapping.fault() {
                     eprintln!("water guard reset poisoned field: {fault}");
-                    water.clear(queue);
                     true
                 } else {
                     false
@@ -83,14 +78,12 @@ impl Sentinel {
             Ok(Err(err)) => {
                 eprintln!("water guard readback failed; resetting field: {err}");
                 self.probe = None;
-                water.clear(queue);
                 true
             }
             Err(TryRecvError::Empty) => false,
             Err(TryRecvError::Disconnected) => {
                 eprintln!("water guard readback channel died; resetting field");
                 self.probe = None;
-                water.clear(queue);
                 true
             }
         }
@@ -241,7 +234,7 @@ impl Readback {
     }
 }
 
-impl Water {
+impl Basin {
     pub(super) fn clear(&self, queue: &wgpu::Queue) {
         let zeros = vec![0_u8; (self.size.width * self.size.height * SIM_BYTES) as usize];
         for texture in &self.textures {

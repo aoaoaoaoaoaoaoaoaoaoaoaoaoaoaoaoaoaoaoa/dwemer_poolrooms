@@ -1,4 +1,4 @@
-//! The Dwemer Poolrooms design system: exact egui chrome over a living water table.
+//! The Dwemer Poolrooms design system: exact egui chrome over living water surfaces.
 
 pub mod chrome;
 mod tide;

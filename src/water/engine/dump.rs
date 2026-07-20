@@ -8,7 +8,7 @@ use std::{
 
 const MAGIC: &[u8] = b"DWEMER_WATER_DUMP\0";
 
-impl Frost {
+impl Engine {
     pub fn dump(
         &self,
         device: &wgpu::Device,
@@ -18,37 +18,27 @@ impl Frost {
         screen: [u32; 2],
         pixels_per_point: f32,
     ) -> Result<()> {
-        let surge = frame.surge();
-        self.dump_surge(device, queue, path, &surge, screen, pixels_per_point)
-    }
-
-    pub(super) fn dump_surge(
-        &self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        path: &Path,
-        surge: &Surge<'_>,
-        screen: [u32; 2],
-        pixels_per_point: f32,
-    ) -> Result<()> {
-        let rig = self.rig.as_ref().context("missing frost rig")?;
+        let viewport = self.viewport.as_ref().context("missing water viewport")?;
+        let basin = viewport
+            .basins
+            .get(&frame.surface)
+            .context("missing surface basin")?;
         let mut blob = Vec::with_capacity(1024);
         blob.extend_from_slice(MAGIC);
         section(
             &mut blob,
             "meta.txt",
-            self.meta(rig, surge, screen, pixels_per_point).as_bytes(),
+            self.meta(viewport, basin, frame, screen, pixels_per_point)
+                .as_bytes(),
         );
-        section(&mut blob, "mask.bin", &mask_bytes(surge));
+        section(
+            &mut blob,
+            "uniforms.bin",
+            bytemuck::bytes_of(&uniforms(frame)),
+        );
         for slot in 0..2 {
-            let bytes = read_texture(
-                device,
-                queue,
-                &rig.water.textures[slot],
-                rig.water.size,
-                SIM_BYTES,
-            )
-            .with_context(|| format!("read water texture {slot}"))?;
+            let bytes = read_texture(device, queue, &basin.textures[slot], basin.size, SIM_BYTES)
+                .with_context(|| format!("read water texture {slot}"))?;
             section(&mut blob, &format!("water{slot}.rg32f"), &bytes);
         }
         if let Some(stride) = format_stride(self.format) {
@@ -57,7 +47,7 @@ impl Frost {
                 height: screen[1].max(1),
                 depth_or_array_layers: 1,
             };
-            let scene = read_texture(device, queue, &rig.scene.texture, size, stride)
+            let scene = read_texture(device, queue, &viewport.scene.texture, size, stride)
                 .context("read egui scene texture")?;
             section(&mut blob, "scene.raw", &scene);
         }
@@ -75,8 +65,9 @@ impl Frost {
 
     fn meta(
         &self,
-        rig: &Rig,
-        surge: &Surge<'_>,
+        viewport: &Viewport,
+        basin: &Basin,
+        frame: &super::super::Frame,
         screen: [u32; 2],
         pixels_per_point: f32,
     ) -> String {
@@ -85,10 +76,10 @@ impl Frost {
             .map_or(0, |age| age.as_millis());
         format!(
             "\
-version = 1
+version = 2
 unix_ms = {unix_ms}
-surface_width = {}
-surface_height = {}
+target_width = {}
+target_height = {}
 pixels_per_point = {pixels_per_point}
 target_format = {:?}
 sim_format = {:?}
@@ -96,9 +87,10 @@ sim_bytes = {SIM_BYTES}
 field_scale = {FIELD_SCALE}
 sim_steps = {SIM_STEPS}
 sim_dt = {SIM_DT}
-water_width = {}
-water_height = {}
-water_phase = {}
+basin_width = {}
+basin_height = {}
+basin_phase = {}
+basin_count = {}
 dry = {}
 wake = {}
 tide = {}
@@ -108,25 +100,28 @@ lift_count = {}
 splash_count = {}
 touch_count = {}
 raft = {}
-brine = {:#?}
+floor_depth = {}
+chemistry = {:#?}
 ",
             screen[0],
             screen[1],
             self.format,
             SIM_FORMAT,
-            rig.water.size.width,
-            rig.water.size.height,
-            rig.water.phase,
-            surge.dry,
-            surge.wake,
-            surge.tide,
-            surge.scroll_tilt,
-            surge.tensions.len(),
-            surge.lifts.len(),
-            surge.splashes.len(),
-            surge.touches.len(),
-            surge.raft.is_some(),
-            surge.brine,
+            basin.size.width,
+            basin.size.height,
+            basin.phase,
+            viewport.basins.len(),
+            frame.dry,
+            frame.wake,
+            frame.tide,
+            frame.scroll_tilt,
+            frame.tensions.len(),
+            frame.lifts.len(),
+            frame.splashes.len(),
+            frame.touches.len(),
+            frame.raft.is_some(),
+            frame.floor.depth,
+            frame.chemistry,
         )
     }
 }

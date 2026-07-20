@@ -2,7 +2,7 @@
 
 Dwemer Poolrooms is the reusable visual and physical substrate extracted from
 `adequate_booru_viewer`: its embedded fonts, dark bronze egui chrome, responsive
-control plates, veil optics, and persistent GPU water table.
+control plates, veil optics, and persistent GPU water surfaces.
 
 It is deliberately one crate with two strata:
 
@@ -16,12 +16,12 @@ manage source ages, or depend on the field's capacity.
 
 ## Use
 
-Until the crate is published, depend on it by path or Git. Import egui through
-the crate so its public geometry types cannot drift from the renderer version:
+Import egui through the crate so its public geometry types cannot drift from
+the renderer version:
 
 ```toml
 [dependencies]
-dwemer_poolrooms = { path = "../dwemer_poolrooms" }
+dwemer_poolrooms = "0.2.0"
 ```
 
 ```rust
@@ -34,20 +34,20 @@ chrome::install(&ctx);
 For a small login or tray application that needs only the design language:
 
 ```toml
-dwemer_poolrooms = { path = "../dwemer_poolrooms", default-features = false }
+dwemer_poolrooms = { version = "0.2.0", default-features = false }
 ```
 
 ## Forcing
 
-`WaterTable` is the application-facing physics boundary. All coordinates passed
+`Surface` is the application-facing physics boundary. All coordinates passed
 to it are logical egui points; physical-pixel conversion happens exactly once in
-`WaterTable::frame`.
+`Surface::frame`.
 
 ```rust
-use dwemer_poolrooms::water::{Poke, WaterTable, Wetness};
+use dwemer_poolrooms::water::{Domain, Poke, Surface, Wetness};
 
-let mut water = WaterTable::new(Wetness::Wet);
-water.begin_surface(gallery_rect);
+let mut water = Surface::new(Wetness::Wet);
+water.begin(Domain::shelf(gallery_rect));
 water.hover(post_id, tile_rect);               // relaxing lift plate
 water.click(tile_rect);                        // calibrated semantic strike
 water.poke(tile_rect, Poke::ring(3.25));       // arbitrary positive impulse
@@ -61,7 +61,11 @@ calibrated to the house style. `poke` is the escape hatch: its placement,
 amplitude, sign, and source law are consumer-controlled, while wetness scaling,
 retirement, prioritization, and GPU limits remain private.
 
-Call `begin_surface` once per UI pass. After painting, seal the pass:
+Call `begin` once per UI pass. `Domain::shelf` models deep content beside a
+shallow control rail; `Domain::basin` erects four reflecting walls. Separate
+`Surface` values are separate physical worlds. Their GPU basins and forcing
+uniforms never alias, even in one submission, and are reclaimed when the
+`Surface` dies. After painting, seal the pass:
 
 ```rust
 let frame = water.frame(&ctx, pixels_per_point, &tooltip_rects, veil);
@@ -76,17 +80,17 @@ The water distorts the already-rasterized UI, so an eframe paint callback is too
 late. A water-bearing application needs an egui-wgpu render graph with this
 order:
 
-1. Construct `Frost::new(device, surface_format)` and call `resize` in physical
+1. Construct `Engine::new(device, target_format)` and call `resize` in physical
    pixels whenever the surface changes.
-2. If `frame.live()`, render egui into `frost.scene_view()`; if dry, render egui
-   directly into the swapchain and call `clear_water`.
-3. Call `frost.compose(..., swapchain_view, &frame)` in the same command encoder.
-4. Submit, then call `frost.after_submit(device, queue, &frame)`.
+2. If `frame.live()`, render egui into `engine.scene_view()`; if dry, render egui
+   directly into the swapchain and call `becalm`.
+3. Call `engine.compose(..., swapchain_view, &frame)` in the same command encoder.
+4. Submit, then call `engine.after_submit(device, queue, &frame)`.
 5. Request another redraw when either `frame.wants_repaint()` or
    `after_submit` returns true.
 
 `dwemer_poolrooms::egui_wgpu` is re-exported so the host uses the exact wgpu
-type universe expected by `Frost`. Window creation, tray behavior, event-loop
+type universe expected by `Engine`. Window creation, tray behavior, event-loop
 wakeups, and surface recovery remain application responsibilities.
 
 ## Features

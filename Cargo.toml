@@ -4,8 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-description = "Dwemer Poolrooms: an austere egui design system over a living GPU water table"
+description = "Dwemer Poolrooms: austere egui chrome over living GPU water surfaces"
 documentation = "https://docs.rs/dwemer_poolrooms"
+repository = "https://github.com/aoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoa/dwemer_poolrooms"
+homepage = "https://github.com/aoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoa/dwemer_poolrooms"
 keywords = ["egui", "wgpu", "gui", "shader"]
 categories = ["gui", "graphics", "rendering"]
 include = ["src/**", "examples/**", "assets/**", "LICENSE*", "README.md"]
@@ -21,15 +23,16 @@ resolver = "3"
 edition = "2024"
 license = "MIT"
 rust-version = "1.96"
-version = "0.1.0"
+version = "0.2.0"
 
 [features]
 default = ["water"]
 instrumentation = []
-water = ["dep:anyhow", "dep:egui-wgpu"]
+water = ["dep:anyhow", "dep:bytemuck", "dep:egui-wgpu"]
 
 [dependencies]
 anyhow = { version = "1.0.102", optional = true }
+bytemuck = { version = "1.25.1", features = ["derive"], optional = true }
 egui = "=0.34.3"
 egui-wgpu = { version = "=0.34.3", optional = true }
 

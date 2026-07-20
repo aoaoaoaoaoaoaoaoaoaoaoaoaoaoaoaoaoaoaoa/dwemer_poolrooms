@@ -1,8 +1,13 @@
-//! The water under the UI: frost veil, lift plates, a persistent damped-wave
-//! field, control quivers, and the bounded pond.
+//! Shared GPU law and private persistent basins for living UI water surfaces.
 
+use bytemuck::{Pod, Zeroable};
 use egui_wgpu::wgpu;
-use std::f32::consts::TAU;
+use std::{
+    collections::HashMap,
+    f32::consts::TAU,
+    mem::size_of,
+    sync::{Arc, Weak},
+};
 
 #[cfg(test)]
 mod audit;
@@ -17,17 +22,16 @@ const FIELD_SCALE: u32 = 2;
 const SIM_STEPS: usize = 4;
 const SIM_DT: f32 = 1.0 / 240.0;
 
-pub const LIFT_SLOTS: usize = 4;
+pub(super) const LIFT_SLOTS: usize = 4;
 
-pub const SPLASH_SLOTS: usize = 32;
-pub const QUIVER_SLOTS: usize = 4;
+pub(super) const SPLASH_SLOTS: usize = 32;
+pub(super) const QUIVER_SLOTS: usize = 4;
 pub const BULGE_CEIL: f32 = 12.0;
-pub const TOUCH_SLOTS: usize = 12;
+pub(super) const TOUCH_SLOTS: usize = 12;
 
-const MASK_BYTES: u64 = 1664;
-
-#[derive(Clone, Copy, Debug)]
-pub struct Brine {
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+#[repr(C)]
+pub struct Chemistry {
     pub reach: f32,
     pub meniscus_px: f32,
     pub refract_px: f32,
@@ -54,7 +58,7 @@ pub struct Brine {
     pub shore_feather: f32,
 }
 
-impl Default for Brine {
+impl Default for Chemistry {
     fn default() -> Self {
         Self {
             reach: 34.0,
@@ -86,22 +90,22 @@ impl Default for Brine {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct Tension {
-    pub rect: egui::Rect,
-    pub pointer: egui::Pos2,
-    pub grip: f32,
-    pub omega: f32,
+pub(super) struct Tension {
+    pub(super) rect: egui::Rect,
+    pub(super) pointer: egui::Pos2,
+    pub(super) grip: f32,
+    pub(super) omega: f32,
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct Lift {
-    pub rect: egui::Rect,
-    pub grip: f32,
-    pub depth: LiftDepth,
+pub(super) struct Lift {
+    pub(super) rect: egui::Rect,
+    pub(super) grip: f32,
+    pub(super) depth: LiftDepth,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum LiftDepth {
+pub(super) enum LiftDepth {
     Surface,
     Shallow,
 }
@@ -133,18 +137,18 @@ impl Lift {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct Splash {
-    pub rect: egui::Rect,
-    pub age: f32,
-    pub amp: f32,
-    pub shape: SplashShape,
+pub(super) struct Splash {
+    pub(super) rect: egui::Rect,
+    pub(super) age: f32,
+    pub(super) amp: f32,
+    pub(super) shape: SplashShape,
     /// Signed screen-y a dragged surface (a spun tape) travels, 0 for a plain
     /// splash. Non-zero turns the source into a directional velocity dipole.
-    pub drag: f32,
+    pub(super) drag: f32,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum SplashShape {
+pub(super) enum SplashShape {
     #[default]
     Ring,
     Basin,
@@ -161,62 +165,53 @@ impl SplashShape {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct Raft {
-    pub rect: egui::Rect,
-    pub corners: [f32; 4],
+pub(super) struct Raft {
+    pub(super) rect: egui::Rect,
+    pub(super) corners: [f32; 4],
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct Touch {
-    pub center: egui::Pos2,
-    pub age: f32,
-    pub amp: f32,
-}
-
-pub struct Surge<'a> {
-    pub dry: bool,
-    pub veil: Option<Veil>,
-    pub tensions: &'a [Tension],
-    pub lifts: &'a [Lift],
-    pub water: egui::Rect,
-    pub scroll_tilt: f32,
-    pub splashes: &'a [Splash],
-    pub raft: Option<Raft>,
-    pub floor: egui::Rect,
-    pub viewer: egui::Rect,
-    pub touches: &'a [Touch],
-    /// Keep the persistent solver ticking while old energy decays, even after
-    /// its one-frame exciters have fallen out of the CPU source lists.
-    pub wake: bool,
-    /// Wall-clock seconds (wrapped) driving the tremor wavetrains.
-    pub tide: f32,
-    pub brine: Brine,
-    pub guard: bool,
-}
-
-impl Surge<'_> {
-    fn sim_live(&self) -> bool {
-        !self.dry
-            && (!self.tensions.is_empty()
-                || !self.lifts.is_empty()
-                || !self.splashes.is_empty()
-                || self.raft.is_some()
-                || self.wake)
-    }
+pub(super) struct Touch {
+    pub(super) center: egui::Pos2,
+    pub(super) age: f32,
+    pub(super) amp: f32,
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct Veil {
-    pub cuts: [Cut; 2],
-    pub strength: f32,
-    pub dim: f32,
-    pub blur: f32,
+pub(super) struct Domain {
+    pub(super) rect: egui::Rect,
+    pub(super) enclosed: f32,
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct Cut {
-    pub rect: egui::Rect,
-    pub radius: f32,
+pub(super) struct Floor {
+    pub(super) rect: egui::Rect,
+    pub(super) depth: f32,
+}
+
+impl Floor {
+    pub(super) const NONE: Self = Self {
+        rect: egui::Rect {
+            min: egui::Pos2 { x: -4e6, y: -4e6 },
+            max: egui::Pos2 { x: -4e6, y: -4e6 },
+        },
+        depth: 0.0,
+    };
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Veil {
+    pub(super) cuts: [Cut; 2],
+    pub(super) strength: f32,
+    pub(super) dim: f32,
+    pub(super) blur: f32,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Cut {
+    pub(super) rect: egui::Rect,
+    pub(super) radius: f32,
+    pub(super) barrier: f32,
 }
 
 impl Cut {
@@ -227,41 +222,48 @@ impl Cut {
             max: egui::Pos2 { x: -4e6, y: -4e6 },
         },
         radius: 0.0,
+        barrier: 0.0,
     };
 }
 
-pub struct Frost {
+/// Shared compute and optical machinery. Persistent state lives in one private
+/// basin per application [`super::Surface`].
+pub struct Engine {
     sample_layout: wgpu::BindGroupLayout,
     composite_layout: wgpu::BindGroupLayout,
     sim_layout: wgpu::BindGroupLayout,
     down: wgpu::RenderPipeline,
     up: wgpu::RenderPipeline,
-    pipes: Pipes,
+    pipelines: Pipelines,
     sampler: wgpu::Sampler,
-    mask: wgpu::Buffer,
     format: wgpu::TextureFormat,
-    rig: Option<Rig>,
-    sentinel: guard::Sentinel,
+    viewport: Option<Viewport>,
 }
 
-struct Pipes {
+struct Pipelines {
     composite: wgpu::RenderPipeline,
     sim: wgpu::ComputePipeline,
 }
 
 /// The size-dependent resources, rebuilt on resize.
-struct Rig {
+struct Viewport {
+    size: wgpu::Extent3d,
     scene: Target,
-    chain: Vec<Target>,
-    water: Water,
+    blur_chain: Vec<Target>,
+    basins: HashMap<super::surface::SurfaceId, Basin>,
 }
 
-struct Water {
+/// One persistent `(height, velocity)` field and its numerical guard.
+struct Basin {
     size: wgpu::Extent3d,
-    textures: Vec<wgpu::Texture>,
-    composite_bind: Vec<wgpu::BindGroup>,
-    sim_bind: Vec<wgpu::BindGroup>,
+    life: Weak<()>,
+    uniforms: wgpu::Buffer,
+    textures: [wgpu::Texture; 2],
+    composite_bindings: [wgpu::BindGroup; 2],
+    sim_bindings: [wgpu::BindGroup; 2],
     phase: usize,
+    generation: u64,
+    sentinel: guard::Sentinel,
 }
 
 struct Target {
@@ -271,22 +273,61 @@ struct Target {
     bind: wgpu::BindGroup,
 }
 
-impl Frost {
+/// Resources needed to mint a basin inside one viewport.
+struct Foundry<'a> {
+    device: &'a wgpu::Device,
+    queue: &'a wgpu::Queue,
+    viewport_size: wgpu::Extent3d,
+    scene: &'a Target,
+    blur: &'a Target,
+    composite_layout: &'a wgpu::BindGroupLayout,
+    sim_layout: &'a wgpu::BindGroupLayout,
+    sampler: &'a wgpu::Sampler,
+}
+
+/// CPU/WGSL treaty. Every aggregate begins on a 16-byte boundary; the size
+/// assertion and bytemuck cast make layout drift a compile-time failure rather
+/// than a chromatic scar discovered by eye.
+#[derive(Clone, Copy, Pod, Zeroable)]
+#[repr(C)]
+struct Uniforms {
+    cut_rects: [[f32; 4]; 2],
+    cut_vitals: [[f32; 4]; 2],
+    domain: [f32; 4],
+    optics: [f32; 4],
+    motion: [f32; 4],
+    lift_rects: [[f32; 4]; LIFT_SLOTS],
+    lift_grips: [f32; 4],
+    quivers: [[f32; 8]; QUIVER_SLOTS],
+    splashes: [[f32; 8]; SPLASH_SLOTS],
+    pond: [f32; 4],
+    touches: [[f32; 4]; TOUCH_SLOTS],
+    chemistry: Chemistry,
+    raft_rect: [f32; 4],
+    raft_corners: [f32; 4],
+    floor_rect: [f32; 4],
+    floor_vitals: [f32; 4],
+}
+
+const UNIFORM_BYTES: u64 = size_of::<Uniforms>() as u64;
+const _: () = assert!(size_of::<Uniforms>() == 1712);
+
+impl Engine {
     pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("frost"),
+            label: Some("poolrooms-water"),
             source: wgpu::ShaderSource::Wgsl(WGSL.into()),
         });
         let sim_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("frost-sim"),
+            label: Some("poolrooms-water-sim"),
             source: wgpu::ShaderSource::Wgsl(SIM_WGSL.into()),
         });
         let sample_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("frost-sample"),
+            label: Some("poolrooms-water-sample"),
             entries: &[texture_entry(0), sampler_entry(1)],
         });
         let composite_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("frost-composite"),
+            label: Some("poolrooms-water-composite"),
             entries: &[
                 texture_entry(0),
                 texture_entry(1),
@@ -297,7 +338,7 @@ impl Frost {
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
-                        min_binding_size: wgpu::BufferSize::new(MASK_BYTES),
+                        min_binding_size: wgpu::BufferSize::new(UNIFORM_BYTES),
                     },
                     count: None,
                 },
@@ -305,7 +346,7 @@ impl Frost {
             ],
         });
         let sim_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("frost-sim"),
+            label: Some("poolrooms-water-sim"),
             entries: &[
                 unfilterable_texture_entry(0, wgpu::ShaderStages::COMPUTE),
                 wgpu::BindGroupLayoutEntry {
@@ -324,25 +365,19 @@ impl Frost {
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
-                        min_binding_size: wgpu::BufferSize::new(MASK_BYTES),
+                        min_binding_size: wgpu::BufferSize::new(UNIFORM_BYTES),
                     },
                     count: None,
                 },
             ],
         });
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("frost-linear"),
+            label: Some("poolrooms-water-linear"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
             address_mode_v: wgpu::AddressMode::ClampToEdge,
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
-        });
-        let mask = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("frost-mask"),
-            size: MASK_BYTES,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
         });
         let pipeline =
             |label: &str, layout: &wgpu::BindGroupLayout, entry, constants: &[(&str, f64)]| {
@@ -382,7 +417,7 @@ impl Frost {
                 })
             };
         let sim_layout_handle = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("frost-sim"),
+            label: Some("poolrooms-water-sim"),
             bind_group_layouts: &[Some(&sim_layout)],
             immediate_size: 0,
         });
@@ -392,10 +427,15 @@ impl Frost {
             ("DT", f64::from(SIM_DT)),
             ("IMPULSE_GAIN", 4.0 / SIM_STEPS as f64),
         ];
-        let pipes = Pipes {
-            composite: pipeline("frost-composite", &composite_layout, "composite", &field),
+        let pipelines = Pipelines {
+            composite: pipeline(
+                "poolrooms-water-composite",
+                &composite_layout,
+                "composite",
+                &field,
+            ),
             sim: device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some("frost-sim"),
+                label: Some("poolrooms-water-sim"),
                 layout: Some(&sim_layout_handle),
                 module: &sim_module,
                 entry_point: Some("step"),
@@ -407,23 +447,21 @@ impl Frost {
             }),
         };
         Self {
-            down: pipeline("frost-down", &sample_layout, "kawase_down", &[]),
-            up: pipeline("frost-up", &sample_layout, "kawase_up", &[]),
-            pipes,
+            down: pipeline("poolrooms-water-down", &sample_layout, "kawase_down", &[]),
+            up: pipeline("poolrooms-water-up", &sample_layout, "kawase_up", &[]),
+            pipelines,
             sample_layout,
             composite_layout,
             sim_layout,
             sampler,
-            mask,
             format,
-            rig: None,
-            sentinel: guard::Sentinel::default(),
+            viewport: None,
         }
     }
 
-    pub fn resize(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, width: u32, height: u32) {
+    pub fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
         if width == 0 || height == 0 {
-            self.rig = None;
+            self.viewport = None;
             return;
         }
         let target = |label: &str, w: u32, h: u32| {
@@ -464,79 +502,85 @@ impl Frost {
                 bind,
             }
         };
-        let scene = target("frost-scene", width, height);
-        let chain = (1..=LEVELS as u32)
-            .map(|level| target("frost-chain", width >> level, height >> level))
+        let scene = target("poolrooms-water-scene", width, height);
+        let blur_chain = (1..=LEVELS as u32)
+            .map(|level| target("poolrooms-water-chain", width >> level, height >> level))
             .collect::<Vec<_>>();
-        let water = self.water(device, queue, width, height, &scene, &chain[0]);
-        self.rig = Some(Rig {
+        self.viewport = Some(Viewport {
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
             scene,
-            chain,
-            water,
+            blur_chain,
+            basins: HashMap::new(),
         });
     }
 
     /// Render target for the egui pass when a veil is up.
     pub fn scene_view(&self) -> Option<&wgpu::TextureView> {
-        self.rig.as_ref().map(|rig| &rig.scene.view)
+        self.viewport.as_ref().map(|viewport| &viewport.scene.view)
     }
 
-    /// Composites the offscreen scene to `surface` with the sealed water frame.
+    /// Composites the offscreen scene to `target` with the sealed water frame.
     pub fn compose(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
-        surface: &wgpu::TextureView,
+        target: &wgpu::TextureView,
         frame: &super::Frame,
     ) {
-        let surge = frame.surge();
-        self.compose_surge(device, queue, encoder, surface, &surge);
-    }
-
-    fn compose_surge(
-        &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        encoder: &mut wgpu::CommandEncoder,
-        surface: &wgpu::TextureView,
-        surge: &Surge<'_>,
-    ) {
-        let Some(rig) = &mut self.rig else {
+        self.ensure_basin(device, queue, frame.surface, frame.generation, &frame.life);
+        let Some(viewport) = &mut self.viewport else {
             return;
         };
-        queue.write_buffer(&self.mask, 0, &mask_bytes(surge));
-        if surge.sim_live() {
+        let Some(basin) = viewport.basins.get_mut(&frame.surface) else {
+            return;
+        };
+        queue.write_buffer(&basin.uniforms, 0, bytemuck::bytes_of(&uniforms(frame)));
+        if frame.sim_live() {
             for _ in 0..SIM_STEPS {
                 run_compute(
                     encoder,
-                    &self.pipes.sim,
-                    &rig.water.sim_bind[rig.water.phase],
-                    rig.water.size,
+                    &self.pipelines.sim,
+                    &basin.sim_bindings[basin.phase],
+                    basin.size,
                 );
-                rig.water.phase ^= 1;
+                basin.phase ^= 1;
             }
         }
-        if surge.veil.is_some_and(|veil| veil.blur > 0.0) {
+        if frame.veil.is_some_and(|veil| veil.blur > 0.0) {
             let mut blur = |pipeline, source: &Target, sink: &wgpu::TextureView| {
                 run_pass(encoder, pipeline, &source.bind, sink);
             };
-            blur(&self.down, &rig.scene, &rig.chain[0].view);
+            blur(&self.down, &viewport.scene, &viewport.blur_chain[0].view);
             for level in 1..LEVELS {
-                blur(&self.down, &rig.chain[level - 1], &rig.chain[level].view);
+                blur(
+                    &self.down,
+                    &viewport.blur_chain[level - 1],
+                    &viewport.blur_chain[level].view,
+                );
             }
             for level in (1..LEVELS).rev() {
-                blur(&self.up, &rig.chain[level], &rig.chain[level - 1].view);
+                blur(
+                    &self.up,
+                    &viewport.blur_chain[level],
+                    &viewport.blur_chain[level - 1].view,
+                );
             }
         }
         run_pass(
             encoder,
-            &self.pipes.composite,
-            &rig.water.composite_bind[rig.water.phase],
-            surface,
+            &self.pipelines.composite,
+            &basin.composite_bindings[basin.phase],
+            target,
         );
-        if surge.guard {
-            self.sentinel.encode(device, encoder, &rig.water);
+        if frame.guard {
+            basin
+                .sentinel
+                .encode(device, encoder, basin.size, &basin.textures[basin.phase]);
         }
     }
 
@@ -546,145 +590,190 @@ impl Frost {
         queue: &wgpu::Queue,
         frame: &super::Frame,
     ) -> bool {
-        self.after_submit_guard(device, queue, frame.guard)
-    }
-
-    fn after_submit_guard(
-        &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        guard: bool,
-    ) -> bool {
-        let Some(rig) = &self.rig else {
+        let Some(viewport) = &mut self.viewport else {
             return false;
         };
-        if guard {
-            self.sentinel.after_submit(device, queue, &rig.water)
+        let Some(basin) = viewport.basins.get_mut(&frame.surface) else {
+            return false;
+        };
+        if frame.guard {
+            let poisoned = basin.sentinel.after_submit(device);
+            if poisoned {
+                basin.clear(queue);
+            }
+            poisoned
         } else {
-            self.sentinel.disarm();
+            basin.sentinel.disarm();
             false
         }
     }
 
-    pub fn clear_water(&mut self, queue: &wgpu::Queue) {
-        self.sentinel.disarm();
-        if let Some(rig) = &self.rig {
-            rig.water.clear(queue);
+    pub fn becalm(&mut self, queue: &wgpu::Queue) {
+        if let Some(viewport) = &mut self.viewport {
+            for basin in viewport.basins.values_mut() {
+                basin.sentinel.disarm();
+                basin.clear(queue);
+            }
         }
     }
 
-    fn water(
-        &self,
+    fn ensure_basin(
+        &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        width: u32,
-        height: u32,
-        scene: &Target,
-        blur: &Target,
-    ) -> Water {
+        id: super::surface::SurfaceId,
+        generation: u64,
+        life: &Arc<()>,
+    ) {
+        let Some(viewport) = &mut self.viewport else {
+            return;
+        };
+        let Viewport {
+            size,
+            scene,
+            blur_chain,
+            basins,
+        } = viewport;
+        basins.retain(|_, basin| basin.life.strong_count() != 0);
+        let basin = basins.entry(id).or_insert_with(|| {
+            Foundry {
+                device,
+                queue,
+                viewport_size: *size,
+                scene,
+                blur: &blur_chain[0],
+                composite_layout: &self.composite_layout,
+                sim_layout: &self.sim_layout,
+                sampler: &self.sampler,
+            }
+            .basin(generation, Arc::downgrade(life))
+        });
+        if basin.generation != generation {
+            basin.sentinel.disarm();
+            basin.clear(queue);
+            basin.phase = 0;
+            basin.generation = generation;
+        }
+    }
+}
+
+impl Foundry<'_> {
+    fn basin(self, generation: u64, life: Weak<()>) -> Basin {
+        let Self {
+            device,
+            queue,
+            viewport_size,
+            scene,
+            blur,
+            composite_layout,
+            sim_layout,
+            sampler,
+        } = self;
         let size = wgpu::Extent3d {
-            width: width.div_ceil(FIELD_SCALE).max(1),
-            height: height.div_ceil(FIELD_SCALE).max(1),
+            width: viewport_size.width.div_ceil(FIELD_SCALE).max(1),
+            height: viewport_size.height.div_ceil(FIELD_SCALE).max(1),
             depth_or_array_layers: 1,
         };
-        let textures = (0..2)
-            .map(|slot| {
-                let texture = device.create_texture(&wgpu::TextureDescriptor {
-                    label: Some("frost-water"),
-                    size,
-                    mip_level_count: 1,
-                    sample_count: 1,
-                    dimension: wgpu::TextureDimension::D2,
-                    format: SIM_FORMAT,
-                    usage: wgpu::TextureUsages::COPY_DST
-                        | wgpu::TextureUsages::COPY_SRC
-                        | wgpu::TextureUsages::TEXTURE_BINDING
-                        | wgpu::TextureUsages::STORAGE_BINDING,
-                    view_formats: &[SIM_FORMAT],
-                });
-                let zeros = vec![0_u8; (size.width * size.height * SIM_BYTES) as usize];
-                queue.write_texture(
-                    wgpu::TexelCopyTextureInfo {
-                        texture: &texture,
-                        mip_level: 0,
-                        origin: wgpu::Origin3d::ZERO,
-                        aspect: wgpu::TextureAspect::All,
-                    },
-                    &zeros,
-                    wgpu::TexelCopyBufferLayout {
-                        offset: 0,
-                        bytes_per_row: Some(size.width * SIM_BYTES),
-                        rows_per_image: Some(size.height),
-                    },
-                    size,
-                );
-                (slot, texture)
-            })
-            .collect::<Vec<_>>();
+        let textures = std::array::from_fn(|_| {
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("poolrooms-water-field"),
+                size,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: SIM_FORMAT,
+                usage: wgpu::TextureUsages::COPY_DST
+                    | wgpu::TextureUsages::COPY_SRC
+                    | wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::STORAGE_BINDING,
+                view_formats: &[SIM_FORMAT],
+            });
+            let zeros = vec![0_u8; (size.width * size.height * SIM_BYTES) as usize];
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &zeros,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(size.width * SIM_BYTES),
+                    rows_per_image: Some(size.height),
+                },
+                size,
+            );
+            texture
+        });
+        let uniforms = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("poolrooms-water-basin-uniforms"),
+            size: UNIFORM_BYTES,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         let views = textures
-            .iter()
-            .map(|(_, texture)| texture.create_view(&wgpu::TextureViewDescriptor::default()))
-            .collect::<Vec<_>>();
-        let composite_bind = views
-            .iter()
-            .map(|view| {
-                device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("frost-composite"),
-                    layout: &self.composite_layout,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: wgpu::BindingResource::TextureView(&scene.view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: wgpu::BindingResource::TextureView(&blur.view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 2,
-                            resource: wgpu::BindingResource::Sampler(&self.sampler),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 3,
-                            resource: self.mask.as_entire_binding(),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 4,
-                            resource: wgpu::BindingResource::TextureView(view),
-                        },
-                    ],
-                })
+            .each_ref()
+            .map(|texture| texture.create_view(&wgpu::TextureViewDescriptor::default()));
+        let composite_bindings = views.each_ref().map(|view| {
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("poolrooms-water-composite"),
+                layout: composite_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&scene.view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&blur.view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::Sampler(sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: uniforms.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: wgpu::BindingResource::TextureView(view),
+                    },
+                ],
             })
-            .collect::<Vec<_>>();
-        let sim_bind = [(0, 1), (1, 0)]
-            .into_iter()
-            .map(|(src, dst)| {
-                device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("frost-sim"),
-                    layout: &self.sim_layout,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: wgpu::BindingResource::TextureView(&views[src]),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: wgpu::BindingResource::TextureView(&views[dst]),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 2,
-                            resource: self.mask.as_entire_binding(),
-                        },
-                    ],
-                })
+        });
+        let sim_bindings = std::array::from_fn(|src| {
+            let dst = src ^ 1;
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("poolrooms-water-sim"),
+                layout: sim_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&views[src]),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&views[dst]),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: uniforms.as_entire_binding(),
+                    },
+                ],
             })
-            .collect::<Vec<_>>();
-        Water {
+        });
+        Basin {
             size,
-            textures: textures.into_iter().map(|(_, texture)| texture).collect(),
-            composite_bind,
-            sim_bind,
+            life,
+            uniforms,
+            textures,
+            composite_bindings,
+            sim_bindings,
             phase: 0,
+            generation,
+            sentinel: guard::Sentinel::default(),
         }
     }
 }
@@ -696,7 +785,7 @@ fn run_pass(
     sink: &wgpu::TextureView,
 ) {
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-        label: Some("frost"),
+        label: Some("poolrooms-water"),
         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
             view: sink,
             resolve_target: None,
@@ -723,7 +812,7 @@ fn run_compute(
     size: wgpu::Extent3d,
 ) {
     let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-        label: Some("frost-sim"),
+        label: Some("poolrooms-water-sim"),
         timestamp_writes: None,
     });
     pass.set_pipeline(pipeline);
@@ -773,46 +862,48 @@ fn sampler_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     }
 }
 
-fn mask_bytes(surge: &Surge<'_>) -> [u8; MASK_BYTES as usize] {
+fn uniforms(frame: &super::Frame) -> Uniforms {
     const NO_VEIL: Veil = Veil {
         cuts: [Cut::NONE, Cut::NONE],
         strength: 0.0,
         dim: 1.0,
         blur: 0.0,
     };
-    let veil = surge.veil.unwrap_or(NO_VEIL);
-    let [a, b] = &veil.cuts;
-    let mut lanes = [0.0_f32; (MASK_BYTES / 4) as usize];
-    // vec2f block (bytes 0..48): cuts a/b, water.
-    lanes[0..2].copy_from_slice(&[a.rect.min.x, a.rect.min.y]);
-    lanes[2..4].copy_from_slice(&[a.rect.max.x, a.rect.max.y]);
-    lanes[4..6].copy_from_slice(&[b.rect.min.x, b.rect.min.y]);
-    lanes[6..8].copy_from_slice(&[b.rect.max.x, b.rect.max.y]);
-    lanes[8..10].copy_from_slice(&[surge.water.min.x, surge.water.min.y]);
-    lanes[10..12].copy_from_slice(&[surge.water.max.x, surge.water.max.y]);
-    // scalar block (bytes 48..80), one pad lane to reach the arrays.
-    lanes[12] = a.radius;
-    lanes[13] = b.radius;
-    lanes[14] = veil.strength.clamp(0.0, 1.0);
-    lanes[15] = veil.dim;
-    lanes[16] = veil.blur.clamp(0.0, 1.0);
-    lanes[17] = surge.tide;
-    lanes[18] = surge.scroll_tilt;
-    // lift_rects @ byte 80 (lane 20); grips @ 144 (lane 36).
-    for (slot, lift) in surge.lifts.iter().take(LIFT_SLOTS).enumerate() {
-        let at = 20 + slot * 4;
-        lanes[at..at + 4].copy_from_slice(&[
+    let veil = frame.veil.unwrap_or(NO_VEIL);
+    let mut packed = Uniforms::zeroed();
+    for (slot, cut) in veil.cuts.iter().enumerate() {
+        packed.cut_rects[slot] = [
+            cut.rect.min.x,
+            cut.rect.min.y,
+            cut.rect.max.x,
+            cut.rect.max.y,
+        ];
+        packed.cut_vitals[slot] = [cut.radius, cut.barrier, 0.0, 0.0];
+    }
+    packed.domain = [
+        frame.domain.rect.min.x,
+        frame.domain.rect.min.y,
+        frame.domain.rect.max.x,
+        frame.domain.rect.max.y,
+    ];
+    packed.optics = [
+        veil.strength.clamp(0.0, 1.0),
+        veil.dim,
+        veil.blur.clamp(0.0, 1.0),
+        frame.tide,
+    ];
+    packed.motion = [frame.scroll_tilt, frame.domain.enclosed, 0.0, 0.0];
+    for (slot, lift) in frame.lifts.iter().take(LIFT_SLOTS).enumerate() {
+        packed.lift_rects[slot] = [
             lift.rect.min.x,
             lift.rect.min.y,
             lift.rect.max.x,
             lift.rect.max.y,
-        ]);
-        lanes[36 + slot] = lift.packed_grip();
+        ];
+        packed.lift_grips[slot] = lift.packed_grip();
     }
-    // quivers @ byte 160 (lane 40): rect, then pointer + grip + omega.
-    for (slot, quiver) in surge.tensions.iter().take(QUIVER_SLOTS).enumerate() {
-        let at = 40 + slot * 8;
-        lanes[at..at + 8].copy_from_slice(&[
+    for (slot, quiver) in frame.tensions.iter().take(QUIVER_SLOTS).enumerate() {
+        packed.quivers[slot] = [
             quiver.rect.min.x,
             quiver.rect.min.y,
             quiver.rect.max.x,
@@ -821,12 +912,10 @@ fn mask_bytes(surge: &Surge<'_>) -> [u8; MASK_BYTES as usize] {
             quiver.pointer.y,
             quiver.grip.clamp(0.0, 1.0),
             quiver.omega.max(0.0),
-        ]);
+        ];
     }
-    // splashes @ byte 288 (lane 72): rect, then age + amp + shape + pad.
-    for (slot, splash) in surge.splashes.iter().take(SPLASH_SLOTS).enumerate() {
-        let at = 72 + slot * 8;
-        lanes[at..at + 8].copy_from_slice(&[
+    for (slot, splash) in frame.splashes.iter().take(SPLASH_SLOTS).enumerate() {
+        packed.splashes[slot] = [
             splash.rect.min.x,
             splash.rect.min.y,
             splash.rect.max.x,
@@ -835,64 +924,43 @@ fn mask_bytes(surge: &Surge<'_>) -> [u8; MASK_BYTES as usize] {
             splash.amp,
             splash.shape.code(),
             splash.drag,
-        ]);
+        ];
     }
-    // viewer rect @ byte 1312 (lane 328), touches @ byte 1328 (lane 332).
-    lanes[328..330].copy_from_slice(&[surge.viewer.min.x, surge.viewer.min.y]);
-    lanes[330..332].copy_from_slice(&[surge.viewer.max.x, surge.viewer.max.y]);
-    for (slot, touch) in surge.touches.iter().take(TOUCH_SLOTS).enumerate() {
-        let at = 332 + slot * 4;
-        lanes[at..at + 4].copy_from_slice(&[touch.center.x, touch.center.y, touch.age, touch.amp]);
+    packed.pond = [
+        frame.viewer.min.x,
+        frame.viewer.min.y,
+        frame.viewer.max.x,
+        frame.viewer.max.y,
+    ];
+    for (slot, touch) in frame.touches.iter().take(TOUCH_SLOTS).enumerate() {
+        packed.touches[slot] = [touch.center.x, touch.center.y, touch.age, touch.amp];
     }
-    // brine @ byte 1520 (lane 380): the runtime-tunable water chemistry.
-    let brine = &surge.brine;
-    lanes[380..404].copy_from_slice(&[
-        brine.reach,
-        brine.meniscus_px,
-        brine.refract_px,
-        brine.ior_spread,
-        brine.quiver_bulge,
-        brine.quiver_pulse,
-        brine.tremor_k,
-        brine.tremor_omega,
-        brine.tremor_amp,
-        brine.tremor_fade,
-        brine.tremor_reach,
-        brine.bulge_px.min(BULGE_CEIL),
-        brine.lift_bright,
-        brine.wave_v,
-        brine.wave_sigma,
-        brine.wave_damp,
-        brine.wave_spread,
-        brine.source_gain,
-        brine.height_retention,
-        brine.tilt_gain,
-        brine.t_panel,
-        brine.r_panel,
-        brine.r_wall,
-        brine.shore_feather,
-    ]);
-    if let Some(raft) = surge.raft {
-        lanes[404..408].copy_from_slice(&[
+    packed.chemistry = frame.chemistry;
+    packed.chemistry.bulge_px = packed.chemistry.bulge_px.min(BULGE_CEIL);
+    if let Some(raft) = frame.raft {
+        packed.raft_rect = [
             raft.rect.min.x,
             raft.rect.min.y,
             raft.rect.max.x,
             raft.rect.max.y,
-        ]);
-        lanes[408..412].copy_from_slice(&raft.corners);
+        ];
+        packed.raft_corners = raft.corners;
     }
-    lanes[412..416].copy_from_slice(&[
-        surge.floor.min.x,
-        surge.floor.min.y,
-        surge.floor.max.x,
-        surge.floor.max.y,
-    ]);
-    let mut bytes = [0_u8; MASK_BYTES as usize];
-    for (slot, lane) in lanes.iter().enumerate() {
-        bytes[slot * 4..slot * 4 + 4].copy_from_slice(&lane.to_le_bytes());
-    }
-    bytes
+    packed.floor_rect = [
+        frame.floor.rect.min.x,
+        frame.floor.rect.min.y,
+        frame.floor.rect.max.x,
+        frame.floor.rect.max.y,
+    ];
+    packed.floor_vitals = [frame.floor.depth.clamp(0.0, 1.0), 0.0, 0.0, 0.0];
+    packed
 }
 
-const WGSL: &str = include_str!("gpu/composite.wgsl");
-const SIM_WGSL: &str = include_str!("gpu/sim.wgsl");
+const WGSL: &str = concat!(
+    include_str!("engine/forcing.wgsl"),
+    include_str!("engine/composite.wgsl")
+);
+const SIM_WGSL: &str = concat!(
+    include_str!("engine/forcing.wgsl"),
+    include_str!("engine/sim.wgsl")
+);

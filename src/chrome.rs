@@ -249,7 +249,7 @@ const SHALLOW_GRIP: f32 = 0.42;
 const TEXT_GRIP: f32 = 0.36;
 const TEXT_PULSE_HZ: f32 = 0.3;
 
-/// Puts a hovered widget "in tension": records a seed the frost composite
+/// Puts a hovered widget "in tension": records a seed the water composite
 /// turns into a refraction toward the pointer (blue bent hardest). The seed
 /// is per-frame temp data; the boiler consumes it after the UI pass.
 pub fn tension(ui: &egui::Ui, response: &egui::Response) {
