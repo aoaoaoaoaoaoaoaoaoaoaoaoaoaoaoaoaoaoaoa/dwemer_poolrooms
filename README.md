@@ -18,7 +18,7 @@ cargo run --example date_spool_gallery
 
 ```toml
 [dependencies]
-dwemer_poolrooms = "0.2.0"
+dwemer_poolrooms = "0.3.1"
 ```
 
 Import egui through the crate to keep its public geometry types aligned with
@@ -34,7 +34,7 @@ chrome::install(&ctx);
 For chrome without GPU water:
 
 ```toml
-dwemer_poolrooms = { version = "0.2.0", default-features = false }
+dwemer_poolrooms = { version = "0.3.1", default-features = false }
 ```
 
 ## Water

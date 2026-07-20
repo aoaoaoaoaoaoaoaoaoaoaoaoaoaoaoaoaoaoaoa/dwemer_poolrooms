@@ -30,3 +30,16 @@ macro_rules! poolroom_anchor {
         $crate::instrumentation::record($ui, $name, $rect);
     }};
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn readme_dependency_examples_name_the_package_version() {
+        let quoted = format!("\"{}\"", env!("CARGO_PKG_VERSION"));
+        assert_eq!(
+            include_str!("../README.md").matches(&quoted).count(),
+            2,
+            "README dependency examples must follow the package version"
+        );
+    }
+}
