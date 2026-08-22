@@ -22,7 +22,7 @@ The payload contains:
   the public `Monoglyph` mechanism;
 - `chrome/platform-die-atlas.png`: seven foundry-rendered platform marks;
 - `riptide.js`: a bounded WebGL2 projection of Poolrooms water beneath an
-  ordinary DOM; and
+  ordinary DOM, including opt-in passing rain; and
 - `poolrooms.css`: optional generic layout and pose selection.
 
 The source locks are synchronization boundaries, not claims that every web
@@ -54,6 +54,13 @@ relative to its own URL, so the kit can inhabit any same-origin directory.
 Prefer a versioned deployment directory such as `/poolrooms/0.13.1/`. A site
 that keeps stable asset paths must replace the document, SRI seal, asset, and
 edge cache atomically.
+
+`data-riptide-rain="passing"` on `body` admits rain ten seconds into the page
+lifetime. Riptide samples a random-phase, low-frequency field four times per
+second. Only its upper decile rains; intensity becomes the arrival probability
+of finite wakes inside one broad drifting lobe. Dry weather performs no
+rendering, and the ordinary reduced-motion and data-saver gates disable the
+clock with the rest of Riptide.
 
 `scripts/web-kit package` emits `brass-poolrooms-web-<version>.tar.gz` with a
 manifest recording the crate version, source commit and dirty state, web ABI,

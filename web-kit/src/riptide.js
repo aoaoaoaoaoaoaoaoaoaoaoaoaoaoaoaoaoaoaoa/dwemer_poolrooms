@@ -17,6 +17,8 @@ const TILE_PITCH = 252;
 const WAKE_SLOTS = 6;
 const FIELD_LIMIT = 8 * 1024 * 1024;
 const DELUGE = 2;
+const RAIN_DELAY = 10000;
+const RAIN_STEP = 250;
 
 const VERTEX = `#version 300 es
 void main() {
@@ -79,7 +81,7 @@ void main() {
 }`;
 
 class Riptide {
-  static forge() {
+  static _forge() {
     const tileDpr = Math.max(1, Math.ceil(devicePixelRatio));
     if (!isFinite(tileDpr) || tileDpr > 3) return null;
     const canvas = document.createElement("canvas");
@@ -138,20 +140,20 @@ class Riptide {
       const uniform = name => gl.getUniformLocation(program, name);
       gl.uniform1i(uniform("floor_tex"), 0);
       gl.clearColor(0, 0, 0, 0);
-      return new Riptide(canvas, gl, tileDpr, {
-        density: uniform("density"),
-        origin: uniform("origin"),
-        tide: uniform("tide"),
-        viewport: uniform("viewport"),
-        wakes: uniform("wakes[0]"),
-      });
+      return new Riptide(canvas, gl, tileDpr, [
+        uniform("density"),
+        uniform("origin"),
+        uniform("tide"),
+        uniform("viewport"),
+        uniform("wakes[0]"),
+      ]);
     }).catch(() => {
-      Riptide.quench(gl);
+      Riptide._quench(gl);
       return null;
     });
   }
 
-  static quench(gl) {
+  static _quench(gl) {
     try {
       const extinction = gl.getExtension("WEBGL_lose_context");
       if (extinction) extinction.loseContext();
@@ -169,6 +171,8 @@ class Riptide {
     this._motion = null;
     this._flood = [];
     this._field = null;
+    this._weather = null;
+    this._weatherTimer = 0;
     this._dead = false;
     this._unbind = [];
   }
@@ -202,7 +206,8 @@ class Riptide {
     this._listen(self, "scroll", retreat, { passive: true });
     this._listen(self, "resize", retreat, { passive: true });
     this._listen(document, "visibilitychange", () => {
-      if (document.hidden) this._still("ready");
+      if (!document.hidden) return;
+      this._still("ready");
     });
     const motion = matchMedia("(prefers-reduced-motion: reduce)");
     const quell = event => { if (event.matches) this._abort(); };
@@ -217,6 +222,13 @@ class Riptide {
     }
     this._listen(self, "pagehide", event => { if (!event.persisted) this._abort(); });
     this._listen(this._canvas, "webglcontextlost", () => this._abort());
+    if (document.body.dataset.riptideRain === "passing") {
+      this._weather = [0, 0, 0, 0, 0].map(() => Math.random() * Math.PI * 2);
+      this._weatherTimer = setTimeout(
+        () => this._weatherTick(),
+        Math.max(0, RAIN_DELAY - performance.now()),
+      );
+    }
     document.documentElement.setAttribute("data-riptide", "ready");
   }
 
@@ -248,6 +260,37 @@ class Riptide {
     if (distance < 54 || now - then < 72) return;
     this._motion = next;
     this._strike(next[0], next[1], Math.min(0.72, 0.2 + distance / Math.max(now - then, 1) * 0.15) * DELUGE);
+  }
+
+  _weatherTick() {
+    if (this._dead) return;
+    try {
+      const time = performance.now() / 1000;
+      const phase = this._weather;
+      const cover = (
+        Math.sin(time / 29 + phase[0]) +
+        Math.sin(time / 43 + phase[1]) +
+        Math.sin(time / 71 + phase[2])
+      ) / 3;
+      const rain = Math.min(1, Math.max(0, (cover - 0.54) / 0.46));
+      if (rain && !document.hidden && Math.random() < rain) {
+        this._fall(time, phase, rain);
+      }
+      this._weatherTimer = setTimeout(() => this._weatherTick(), RAIN_STEP);
+    } catch {
+      this._abort();
+    }
+  }
+
+  _fall(time, phase, rain) {
+    const scatter = () => Math.random() + Math.random() - 1;
+    const x = 0.5 + 0.42 * Math.sin(time / 53 + phase[3]) + 0.24 * scatter();
+    const y = 0.5 + 0.42 * Math.sin(time / 67 + phase[4]) + 0.24 * scatter();
+    this._strike(
+      x * innerWidth + scrollX,
+      y * innerHeight + scrollY,
+      (0.35 + 0.45 * rain) * DELUGE,
+    );
   }
 
   _strike(x, y, impulse) {
@@ -286,7 +329,7 @@ class Riptide {
     if (this._gl.drawingBufferWidth !== pw || this._gl.drawingBufferHeight !== ph) return false;
     this._gl.viewport(0, 0, pw, ph);
     this._excavate(width, height, density);
-    document.body.insertBefore(this._canvas, document.body.firstChild);
+    document.body.prepend(this._canvas);
     return true;
   }
 
@@ -307,7 +350,7 @@ class Riptide {
     this._frame = 0;
     this._wakes.fill(0);
     this._canvas.style.opacity = 0;
-    if (this._canvas.parentNode) this._canvas.parentNode.removeChild(this._canvas);
+    this._canvas.remove();
     this._canvas.width = this._canvas.height = 1;
     this._field = null;
     if (state) document.documentElement.setAttribute("data-riptide", state);
@@ -317,12 +360,13 @@ class Riptide {
   _abort() {
     if (this._dead) return;
     this._dead = true;
+    clearTimeout(this._weatherTimer);
     while (this._unbind.length) {
       try {
         this._unbind.pop()();
       } catch {}
     }
-    Riptide.quench(this._gl);
+    Riptide._quench(this._gl);
     try {
       this._still(null);
     } catch {}
@@ -334,15 +378,15 @@ class Riptide {
       plate => {
         const rect = plate.getBoundingClientRect();
         return {
-          left: Math.max(0, rect.left),
-          top: Math.max(0, rect.top),
-          right: Math.min(width, rect.right),
-          bottom: Math.min(height, rect.bottom),
+          _left: Math.max(0, rect.left),
+          _top: Math.max(0, rect.top),
+          _right: Math.min(width, rect.right),
+          _bottom: Math.min(height, rect.bottom),
         };
       },
-    ).filter(rect => rect.left < rect.right && rect.top < rect.bottom);
+    ).filter(rect => rect._left < rect._right && rect._top < rect._bottom);
     const cuts = [0, height];
-    for (let i = 0; i < plates.length; ++i) cuts.push(plates[i].top, plates[i].bottom);
+    for (let i = 0; i < plates.length; ++i) cuts.push(plates[i]._top, plates[i]._bottom);
     cuts.sort((a, b) => a - b);
     for (let cut = cuts.length - 1; cut > 0; --cut) {
       if (cuts[cut] === cuts[cut - 1]) cuts.splice(cut, 1);
@@ -351,8 +395,8 @@ class Riptide {
     for (let band = 1; band < cuts.length; ++band) {
       const top = cuts[band - 1];
       const bottom = cuts[band];
-      const dams = plates.filter(rect => rect.top < bottom && rect.bottom > top)
-        .map(rect => [rect.left, rect.right]).sort((a, b) => a[0] - b[0]);
+      const dams = plates.filter(rect => rect._top < bottom && rect._bottom > top)
+        .map(rect => [rect._left, rect._right]).sort((a, b) => a[0] - b[0]);
       let left = 0;
       for (let dam = 0; dam < dams.length; ++dam) {
         if (dams[dam][0] > left) flood.push([left, top, dams[dam][0], bottom]);
@@ -389,11 +433,11 @@ class Riptide {
       if (this._wakes[slot + 1] > 0 && tide - this._wakes[slot] < life) alive = true;
       else this._wakes[slot + 1] = 0;
     }
-    this._gl.uniform1f(this._uniforms.density, density);
-    this._gl.uniform2f(this._uniforms.origin, ox, oy);
-    this._gl.uniform1f(this._uniforms.tide, tide);
-    this._gl.uniform2f(this._uniforms.viewport, pw, ph);
-    this._gl.uniform4fv(this._uniforms.wakes, this._wakes);
+    this._gl.uniform1f(this._uniforms[0], density);
+    this._gl.uniform2f(this._uniforms[1], ox, oy);
+    this._gl.uniform1f(this._uniforms[2], tide);
+    this._gl.uniform2f(this._uniforms[3], pw, ph);
+    this._gl.uniform4fv(this._uniforms[4], this._wakes);
 
     this._gl.disable(this._gl.SCISSOR_TEST);
     this._gl.clear(this._gl.COLOR_BUFFER_BIT);
@@ -410,7 +454,7 @@ class Riptide {
   }
 }
 
-Promise.resolve().then(() => Riptide.forge()).then(riptide => {
+Promise.resolve().then(() => Riptide._forge()).then(riptide => {
   if (!riptide) return;
   try {
     riptide.bind();

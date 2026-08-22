@@ -70,6 +70,7 @@ esbuild web-kit/src/riptide.js \
     --charset=utf8 \
     --legal-comments=none \
     --log-level=warning \
+    --mangle-props='^_' \
     --minify \
     --outfile="$work/riptide.js" \
     >/dev/null
@@ -147,8 +148,8 @@ cargo clippy --quiet --locked --manifest-path "$floor_manifest" --all-targets
 cargo clippy --quiet --locked --manifest-path "$chrome_manifest" --all-targets
 node --check "$work/riptide.js"
 [ "$(wc -c <"$work/riptide.js")" -lt 10000 ] || fail 'riptide exceeds 10,000 raw bytes'
-[ "$(brotli -q 11 -c "$work/riptide.js" | wc -c)" -lt 3500 ] ||
-    fail 'riptide exceeds 3,500 Brotli bytes'
+[ "$(brotli -q 11 -c "$work/riptide.js" | wc -c)" -lt 3650 ] ||
+    fail 'riptide exceeds 3,650 Brotli bytes'
 if rg -n 'WebAssembly|Worker|serviceWorker|fetch\(|XMLHttpRequest|WebSocket|EventSource|localStorage|sessionStorage|indexedDB|eval\(|new Function|console\.' "$work/riptide.js"; then
     fail 'riptide escaped its static finite-runtime charter'
 fi
