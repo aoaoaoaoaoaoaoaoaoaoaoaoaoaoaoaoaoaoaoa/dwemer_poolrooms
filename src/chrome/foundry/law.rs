@@ -6,6 +6,7 @@ pub(crate) const MECHANISM_SIDE_SMALL: u8 = 20;
 pub(crate) const MECHANISM_SIDE_MEDIUM: u8 = 24;
 pub(crate) const MECHANISM_SIDE_LARGE: u8 = 32;
 pub(crate) const RIM_WIDTH: f32 = 1.0;
+pub(crate) const MOMENTARY_CASING_INSET: f32 = RIM_WIDTH;
 pub(crate) const MONOGLYPH_REST: f32 = 3.25;
 pub(crate) const MONOGLYPH_LATCH: f32 = -4.85;
 pub(crate) const MONOGLYPH_PRESS: f32 = -7.15;

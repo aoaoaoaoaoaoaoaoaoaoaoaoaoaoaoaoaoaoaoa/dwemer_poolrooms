@@ -28,7 +28,8 @@ use super::{COUPLING_SPACING, HOT, foundry};
 
 use super::mechanism::{CouplingPorts, CouplingTarget, MechanismSize, sealed};
 use super::plunger::{
-    self, BakedMesh, BakedPose, BakedShadow, BakedVertex, PlungerWake, SpringLaw,
+    self, BakedGuard, BakedMesh, BakedPose, BakedShadow, BakedVertex, GuardCache, PlungerWake,
+    SpringLaw,
 };
 
 #[derive(Clone, Copy)]
@@ -43,9 +44,7 @@ struct BakedCheckboxGauge {
     pose_min: f32,
     pose_max: f32,
     wire_count: u8,
-    guard: BakedMesh,
-    guard_floor_shadow: BakedMesh,
-    guard_crown_shadow: BakedShadow,
+    guard: BakedGuard,
     poses: &'static [BakedPose],
 }
 
@@ -60,7 +59,7 @@ fn spring_law(gauge: BakedCheckboxGauge) -> SpringLaw {
 }
 
 mod baked {
-    use super::{BakedCheckboxGauge, BakedMesh, BakedPose, BakedShadow, BakedVertex};
+    use super::{BakedCheckboxGauge, BakedGuard, BakedMesh, BakedPose, BakedShadow, BakedVertex};
 
     include!(concat!(env!("OUT_DIR"), "/checkbox_atlas.rs"));
 }
@@ -393,9 +392,7 @@ fn paint(
         let _ties = painter.add(foundry::tie_pair(ports.0.right, ports.1.left));
     }
     foundry::socket_bed(painter, anatomy.socket);
-    if let Some(shadow) = &rendered.guard_floor_shadow {
-        foundry::paint_compiled(painter, clip, shadow);
-    }
+    rendered.guard.paint_floor(painter, clip);
     foundry::paint_compiled(painter, anatomy.socket.shrink(1.0), &rendered.button_shadow);
     foundry::paint_compiled(
         painter,
@@ -404,11 +401,7 @@ fn paint(
     );
     foundry::socket_rim(painter, anatomy.socket);
 
-    if let (Some(shadow), Some(guard)) = (&rendered.guard_crown_shadow, &rendered.guard) {
-        let crown_clip = Rect::from_center_size(origin, Vec2::splat(gauge.body_half * 2.5));
-        foundry::paint_compiled(painter, crown_clip, shadow);
-        foundry::paint_compiled(painter, clip, guard);
-    }
+    rendered.guard.paint_crown(painter, clip);
     if let (Some(plaque), Some(rect)) = (plaque, anatomy.plaque) {
         plaque.paint(painter, rect.center());
     }
@@ -426,7 +419,6 @@ fn paint(
 struct InstalledPose {
     button: Arc<egui::Mesh>,
     button_shadow: Arc<egui::Mesh>,
-    guard_crown_shadow: Option<Arc<egui::Mesh>>,
 }
 
 #[derive(Clone, Default)]
@@ -434,8 +426,7 @@ struct RenderCache {
     origin: Option<Pos2>,
     atlas: Option<usize>,
     poses: HashMap<usize, InstalledPose>,
-    guard: Option<Arc<egui::Mesh>>,
-    guard_floor_shadow: Option<Arc<egui::Mesh>>,
+    guard: GuardCache,
 }
 
 impl RenderCache {
@@ -454,10 +445,6 @@ impl RenderCache {
                 ..Self::default()
             };
         }
-        if guarded && self.guard.is_none() {
-            self.guard = Some(plunger::instantiate(gauge.guard, origin));
-            self.guard_floor_shadow = Some(plunger::instantiate(gauge.guard_floor_shadow, origin));
-        }
         let pose = gauge.poses[pose_index];
         let installed = self
             .poses
@@ -465,31 +452,20 @@ impl RenderCache {
             .or_insert_with(|| InstalledPose {
                 button: plunger::instantiate(pose.button, origin),
                 button_shadow: plunger::instantiate(pose.shadow, origin),
-                guard_crown_shadow: None,
             });
-        if guarded && installed.guard_crown_shadow.is_none() {
-            installed.guard_crown_shadow = Some(plunger::instantiate_shadow(
-                gauge.guard_crown_shadow,
-                origin,
-                pose.elevation,
-                baked::SHADOW_EYE_Z,
-                baked::SHADOW_SLOPE,
-            ));
-        }
         Rendered {
             button: installed.button.clone(),
             button_shadow: installed.button_shadow.clone(),
-            guard_crown_shadow: if guarded {
-                installed.guard_crown_shadow.clone()
-            } else {
-                None
-            },
-            guard: if guarded { self.guard.clone() } else { None },
-            guard_floor_shadow: if guarded {
-                self.guard_floor_shadow.clone()
-            } else {
-                None
-            },
+            guard: self.guard.prepare(
+                origin,
+                atlas,
+                gauge.guard,
+                pose_index,
+                pose.elevation,
+                baked::SHADOW_EYE_Z,
+                baked::SHADOW_SLOPE,
+                guarded,
+            ),
         }
     }
 }
@@ -497,9 +473,7 @@ impl RenderCache {
 struct Rendered {
     button: Arc<egui::Mesh>,
     button_shadow: Arc<egui::Mesh>,
-    guard_crown_shadow: Option<Arc<egui::Mesh>>,
-    guard: Option<Arc<egui::Mesh>>,
-    guard_floor_shadow: Option<Arc<egui::Mesh>>,
+    guard: plunger::RenderedGuard,
 }
 
 #[cfg(test)]
@@ -513,14 +487,12 @@ mod tests {
         let origin = Pos2::new(20.0, 20.0);
 
         let guarded = cache.prepare(origin, 0, gauge, 0, true);
-        assert!(guarded.guard.is_some());
+        assert!(guarded.guard.installed());
 
         let enabled = cache.prepare(origin, 0, gauge, 0, false);
-        assert!(enabled.guard.is_none());
-        assert!(enabled.guard_floor_shadow.is_none());
-        assert!(enabled.guard_crown_shadow.is_none());
+        assert!(!enabled.guard.installed());
 
         let guarded_again = cache.prepare(origin, 0, gauge, 0, true);
-        assert!(guarded_again.guard.is_some());
+        assert!(guarded_again.guard.installed());
     }
 }

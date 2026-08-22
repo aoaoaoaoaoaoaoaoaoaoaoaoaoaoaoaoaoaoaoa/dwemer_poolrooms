@@ -170,6 +170,7 @@ impl CornerClose {
             self.size.side(),
             gauge.socket_half,
             gauge.body_half,
+            ui.pixels_per_point(),
         );
         let mut painter = ui.painter().clone();
         if !enabled {

@@ -51,6 +51,11 @@ pub enum Symbol {
     Rename,
     /// Restore a withdrawn or resettable member.
     Restore,
+    /// Write the current object's pending changes to durable storage.
+    ///
+    /// Its monochrome hard-shell disk outline avoids platform emoji
+    /// substitution while retaining the standard save convention.
+    Save,
     /// Open application settings.
     Settings,
     /// Withdraw the most recent command-history entry.
@@ -61,13 +66,14 @@ pub enum Symbol {
 
 impl Symbol {
     /// Complete armory in stable presentation order.
-    pub const ALL: [Self; 18] = [
+    pub const ALL: [Self; 19] = [
         Self::Add,
         Self::Remove,
         Self::Delete,
         Self::Duplicate,
         Self::Rename,
         Self::Confirm,
+        Self::Save,
         Self::Undo,
         Self::Redo,
         Self::Expand,
@@ -99,6 +105,7 @@ impl Symbol {
             Self::Redo => '↷',
             Self::Rename => '✎',
             Self::Restore => '↺',
+            Self::Save => '🖫',
             Self::Settings => '⚙',
             Self::Undo => '↶',
             Self::Visibility => '👁',
@@ -127,6 +134,7 @@ impl Symbol {
             | Self::Remove
             | Self::Rename
             | Self::Restore
+            | Self::Save
             | Self::Settings
             | Self::Undo
             | Self::Visibility => MonoglyphFinish::BrightCut,
@@ -151,6 +159,7 @@ impl Symbol {
             Self::Remove => "REMOVE",
             Self::Rename => "RENAME",
             Self::Restore => "RESTORE",
+            Self::Save => "SAVE",
             Self::Settings => "SETTINGS",
             Self::Undo => "UNDO",
             Self::Visibility => "VISIBILITY",

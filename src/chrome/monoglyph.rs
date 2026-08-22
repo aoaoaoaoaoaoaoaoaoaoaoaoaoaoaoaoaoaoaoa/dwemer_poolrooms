@@ -15,7 +15,10 @@ use egui::{
 use super::{MechanismSize, Symbol, foundry};
 
 use super::mechanism::{CouplingPorts, CouplingTarget, sealed};
-use super::plunger::{self, BakedGauge, BakedMesh, BakedPose, BakedVertex, PlungerWake, SpringLaw};
+use super::plunger::{
+    self, BakedGuard, BakedMesh, BakedPose, BakedShadow, BakedVertex, GuardCache, PlungerWake,
+    SpringLaw,
+};
 
 const ETCH_EM_PER_CROWN: f32 = 13.5 / (8.9 * 2.0);
 const BRIGHT_CUT_DEPTH: f32 = 0.72;
@@ -28,8 +31,19 @@ const SPRING_LAW: SpringLaw = SpringLaw {
     ceiling: baked::POSE_MAX,
 };
 
+#[derive(Clone, Copy)]
+struct BakedMonoglyphGauge {
+    side: u8,
+    socket_half: f32,
+    top_half: f32,
+    body_half: f32,
+    guard: BakedGuard,
+    socket: BakedMesh,
+    poses: &'static [BakedPose],
+}
+
 mod baked {
-    use super::{BakedGauge, BakedMesh, BakedPose, BakedVertex};
+    use super::{BakedGuard, BakedMesh, BakedMonoglyphGauge, BakedPose, BakedShadow, BakedVertex};
 
     include!(concat!(env!("OUT_DIR"), "/monoglyph_atlas.rs"));
 }
@@ -92,6 +106,8 @@ impl MonoglyphFinish {
 /// [`Monoglyph::show_latched`] binds the same mechanism to a boolean state: the
 /// selected state rests at a lower latch while pointer pressure retains a
 /// deeper overtravel stroke.
+/// A disabled mechanism retains its live mark and crown position beneath a
+/// fixed-stock protective grille.
 /// [`Monoglyph::size`] selects one of the exact gauges admitted by
 /// [`MechanismSize`].
 ///
@@ -242,11 +258,32 @@ impl Monoglyph {
             self.size.side(),
             gauge.socket_half,
             gauge.body_half,
+            ui.pixels_per_point(),
         );
+        let pose = plunger::pose_index(
+            motion.position,
+            baked::POSE_MIN,
+            baked::POSE_MAX,
+            gauge.poses.len(),
+        );
+        let guard = ui.ctx().data_mut(|data| {
+            data.get_temp_mut_or_default::<GuardCache>(response.id.with("compiled-guard"))
+                .prepare(
+                    anatomy.socket.center(),
+                    atlas,
+                    gauge.guard,
+                    pose,
+                    gauge.poses[pose].elevation,
+                    baked::SHADOW_EYE_Z,
+                    baked::SHADOW_SLOPE,
+                    !enabled,
+                )
+        });
         let mut painter = ui.painter().clone();
         if !enabled {
             painter.set_opacity(1.0);
         }
+        guard.paint_floor(&painter, anatomy.assembly.expand(2.0));
         plunger::paint_momentary(
             ui,
             &painter,
@@ -271,6 +308,7 @@ impl Monoglyph {
                 );
             },
         );
+        guard.paint_crown(&painter, anatomy.assembly.expand(2.0));
         super::tension(ui, &response);
 
         MonoglyphResponse {
@@ -303,12 +341,37 @@ impl Monoglyph {
             .atom_ui(ui);
         if let Some(atom) = layout.rect(id) {
             let rect = Rect::from_min_size(atom.left_top(), Vec2::splat(side));
-            let anatomy =
-                plunger::MomentaryAnatomy::new(rect, side, gauge.socket_half, gauge.body_half);
+            let anatomy = plunger::MomentaryAnatomy::new(
+                rect,
+                side,
+                gauge.socket_half,
+                gauge.body_half,
+                ui.pixels_per_point(),
+            );
+            let guard = ui.ctx().data_mut(|data| {
+                let pose = plunger::pose_index(
+                    baked::REST,
+                    baked::POSE_MIN,
+                    baked::POSE_MAX,
+                    gauge.poses.len(),
+                );
+                data.get_temp_mut_or_default::<GuardCache>(id.with("compiled-guard"))
+                    .prepare(
+                        anatomy.socket.center(),
+                        atlas,
+                        gauge.guard,
+                        pose,
+                        gauge.poses[pose].elevation,
+                        baked::SHADOW_EYE_Z,
+                        baked::SHADOW_SLOPE,
+                        !ui.is_enabled(),
+                    )
+            });
             let mut painter = ui.painter().clone();
             if !ui.is_enabled() {
                 painter.set_opacity(1.0);
             }
+            guard.paint_floor(&painter, anatomy.assembly.expand(2.0));
             plunger::paint_momentary(
                 ui,
                 &painter,
@@ -333,11 +396,12 @@ impl Monoglyph {
                     );
                 },
             );
+            guard.paint_crown(&painter, anatomy.assembly.expand(2.0));
         }
         layout.response
     }
 
-    fn gauge(self) -> (usize, BakedGauge) {
+    fn gauge(self) -> (usize, BakedMonoglyphGauge) {
         let atlas = self.size.atlas_index();
         let gauge = baked::GAUGES[atlas];
         let law = foundry::law::momentary_gauge(gauge.side);

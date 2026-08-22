@@ -36,6 +36,96 @@ pub(super) struct BakedGauge {
 }
 
 #[derive(Clone, Copy)]
+pub(super) struct BakedGuard {
+    pub(super) mesh: BakedMesh,
+    pub(super) floor_shadow: BakedMesh,
+    pub(super) crown_shadow: BakedShadow,
+}
+
+#[derive(Clone, Default)]
+pub(super) struct GuardCache {
+    origin: Option<Pos2>,
+    atlas: Option<usize>,
+    mesh: Option<Arc<egui::Mesh>>,
+    floor_shadow: Option<Arc<egui::Mesh>>,
+    crown_shadows: HashMap<usize, Arc<egui::Mesh>>,
+}
+
+impl GuardCache {
+    pub(super) fn prepare(
+        &mut self,
+        origin: Pos2,
+        atlas: usize,
+        guard: BakedGuard,
+        pose: usize,
+        receiver_z: f32,
+        eye_z: f32,
+        slope: f32,
+        guarded: bool,
+    ) -> RenderedGuard {
+        if self.origin != Some(origin) || self.atlas != Some(atlas) {
+            *self = Self {
+                origin: Some(origin),
+                atlas: Some(atlas),
+                ..Self::default()
+            };
+        }
+        if !guarded {
+            return RenderedGuard::default();
+        }
+        let mesh = self
+            .mesh
+            .get_or_insert_with(|| instantiate(guard.mesh, origin))
+            .clone();
+        let floor_shadow = self
+            .floor_shadow
+            .get_or_insert_with(|| instantiate(guard.floor_shadow, origin))
+            .clone();
+        let crown_shadow = self
+            .crown_shadows
+            .entry(pose)
+            .or_insert_with(|| {
+                instantiate_shadow(guard.crown_shadow, origin, receiver_z, eye_z, slope)
+            })
+            .clone();
+        RenderedGuard {
+            mesh: Some(mesh),
+            floor_shadow: Some(floor_shadow),
+            crown_shadow: Some(crown_shadow),
+        }
+    }
+}
+
+#[derive(Clone, Default)]
+pub(super) struct RenderedGuard {
+    mesh: Option<Arc<egui::Mesh>>,
+    floor_shadow: Option<Arc<egui::Mesh>>,
+    crown_shadow: Option<Arc<egui::Mesh>>,
+}
+
+impl RenderedGuard {
+    pub(super) fn paint_floor(&self, painter: &egui::Painter, clip: Rect) {
+        if let Some(shadow) = &self.floor_shadow {
+            foundry::paint_compiled(painter, clip, shadow);
+        }
+    }
+
+    pub(super) fn paint_crown(&self, painter: &egui::Painter, clip: Rect) {
+        if let Some(shadow) = &self.crown_shadow {
+            foundry::paint_compiled(painter, clip, shadow);
+        }
+        if let Some(mesh) = &self.mesh {
+            foundry::paint_compiled(painter, clip, mesh);
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn installed(&self) -> bool {
+        self.mesh.is_some() && self.floor_shadow.is_some() && self.crown_shadow.is_some()
+    }
+}
+
+#[derive(Clone, Copy)]
 pub(super) struct SpringLaw {
     pub(super) stiffness: f32,
     pub(super) damping: f32,
@@ -296,8 +386,29 @@ pub(super) struct MomentaryAnatomy {
 }
 
 impl MomentaryAnatomy {
-    pub(super) fn new(rect: Rect, side: f32, socket_half: f32, body_half: f32) -> Self {
-        let assembly = Rect::from_center_size(rect.center(), Vec2::splat(side));
+    pub(super) fn new(
+        rect: Rect,
+        side: f32,
+        socket_half: f32,
+        body_half: f32,
+        pixels_per_point: f32,
+    ) -> Self {
+        debug_assert!(pixels_per_point.is_finite() && pixels_per_point > 0.0);
+        let casing_side = 2.0 * (socket_half - foundry::law::MOMENTARY_CASING_INSET);
+        let physical_side = (casing_side * pixels_per_point).round() as u32;
+        // Even physical spans center on a pixel boundary; odd spans center on
+        // one pixel. Fixing that phase once keeps every nested die coaxial.
+        let phase = if physical_side.is_multiple_of(2) {
+            0.0
+        } else {
+            0.5
+        };
+        let snap = |coordinate: f32| {
+            ((coordinate * pixels_per_point - phase).round() + phase) / pixels_per_point
+        };
+        let center = rect.center();
+        let center = Pos2::new(snap(center.x), snap(center.y));
+        let assembly = Rect::from_center_size(center, Vec2::splat(side));
         Self {
             socket: Rect::from_center_size(assembly.center(), Vec2::splat(socket_half * 2.0)),
             button: Rect::from_center_size(assembly.center(), Vec2::splat(body_half * 2.0)),

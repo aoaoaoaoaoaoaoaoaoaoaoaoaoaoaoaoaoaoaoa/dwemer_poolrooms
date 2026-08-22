@@ -280,7 +280,8 @@ impl Symbols {
                 MechanismSize::Medium => "MEDIUM",
                 MechanismSize::Large => "LARGE",
             };
-            for (band, symbols) in Symbol::ALL.chunks(9).enumerate() {
+            let band_width = Symbol::ALL.len().div_ceil(2);
+            for (band, symbols) in Symbol::ALL.chunks(band_width).enumerate() {
                 let _gauge = ui.horizontal(|ui| {
                     ui.set_min_height(size.side());
                     let _name = ui.add_sized(
@@ -316,6 +317,25 @@ impl Symbols {
                     });
                 water.monoglyph(&button);
                 ui.add_space(8.0);
+            }
+        });
+
+        ui.add_space(8.0);
+        let _guarded = ui.horizontal(|ui| {
+            let _name = ui.add_sized(
+                [74.0, MechanismSize::Medium.side()],
+                egui::Label::new(chrome::eyebrow("DISABLED")),
+            );
+            for symbol in [Symbol::Undo, Symbol::Redo] {
+                let button = ui
+                    .add_enabled_ui(false, |ui| {
+                        Monoglyph::symbol(symbol)
+                            .size(MechanismSize::Medium)
+                            .show(ui)
+                    })
+                    .inner
+                    .on_hover_text(symbol.name());
+                water.monoglyph(&button);
             }
         });
 

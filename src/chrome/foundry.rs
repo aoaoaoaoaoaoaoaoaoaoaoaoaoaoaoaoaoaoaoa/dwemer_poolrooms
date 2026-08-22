@@ -26,7 +26,7 @@ const PLAQUE_ETCH_DEPTH: f32 = 0.96;
 const PLAQUE_ETCH_BEVEL_RUN: f32 = 0.42;
 const FLAT_CUT_BEVEL_RUN: f32 = 0.42;
 const PAINT_GRAIN_PITCH: f32 = 1.6;
-const DANGER_PAINT: Color32 = Color32::from_rgb(139, 49, 13);
+const DANGER_PAINT: Color32 = Color32::from_rgb(212, 74, 40);
 const LOVE_PAINT: Color32 = Color32::from_rgb(191, 61, 105);
 const _: () =
     assert!(PLAQUE_ETCH_DEPTH < PLAQUE_RISE && PLAQUE_ETCH_DEPTH / PLAQUE_ETCH_BEVEL_RUN > 2.0);
@@ -152,9 +152,9 @@ pub(crate) fn bright_cut_etch(
 /// A steep engraving with a narrow bronze wall and a flat material floor.
 ///
 /// The relief is derived from the same dynamic glyph mask as the floor, so it
-/// remains available to every scalar admitted by the font chain. Paint grain
-/// changes the floor material only; it never perturbs the cutter geometry or
-/// the glyph's typographic outline.
+/// remains available to every scalar admitted by the font chain. Danger paint
+/// exposes one physical pixel of soot-black primer around its edge; other
+/// finishes retain the cutter's nominal typographic outline.
 pub(crate) fn flat_cut_etch(
     painter: &egui::Painter,
     clip: Rect,
@@ -185,6 +185,7 @@ pub(crate) fn flat_cut_etch(
         }
         EngravingFloor::Danger(seed) => {
             let paint = DANGER_PAINT.gamma_multiply(exposure);
+            paint_keyline(&incision, pos, &galley, Color32::BLACK);
             let _floor = incision.add(Shape::galley(
                 pos,
                 painted_galley(galley, paint, seed),
@@ -199,6 +200,26 @@ pub(crate) fn flat_cut_etch(
                 rough_paint(paint, seed, 0, 0),
             ));
         }
+    }
+}
+
+fn paint_keyline(painter: &egui::Painter, pos: Pos2, galley: &Arc<Galley>, color: Color32) {
+    let pixel = painter.pixels_per_point().recip();
+    for [x, y] in [
+        [-1.0, -1.0],
+        [0.0, -1.0],
+        [1.0, -1.0],
+        [-1.0, 0.0],
+        [1.0, 0.0],
+        [-1.0, 1.0],
+        [0.0, 1.0],
+        [1.0, 1.0],
+    ] {
+        painter.galley_with_override_text_color(
+            pos + Vec2::new(x * pixel, y * pixel),
+            galley.clone(),
+            color,
+        );
     }
 }
 
